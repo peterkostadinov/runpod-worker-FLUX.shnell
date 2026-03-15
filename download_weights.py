@@ -22,10 +22,10 @@ def fetch_pretrained_model(model_name, **kwargs):
 
 def get_diffusion_pipelines():
     """
-    Fetches the FLUX.1-dev pipeline from the HuggingFace model hub.
+    Fetches the FLUX.1-schnell pipeline from the HuggingFace model hub.
     """
     pipe = fetch_pretrained_model(
-        os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-dev-smashed-no-compile")
+        os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-schnell-smashed-no-compile")
     )
 
     return pipe

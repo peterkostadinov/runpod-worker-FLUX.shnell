@@ -1,6 +1,6 @@
 {
-  "title": "FLUX.1-dev-juiced",
-  "description": "Generate images with a Pruna AI optimized FLUX.1-dev.",
+  "title": "FLUX.1-schnell-juiced",
+  "description": "Generate images with a Pruna AI optimized FLUX.1-schnell.",
   "type": "serverless",
   "category": "image",
   "iconUrl": "https://framerusercontent.com/images/1zpNZDseKMJxNFweAzbVFUyrn8.svg",
@@ -10,27 +10,9 @@
     "gpuIds": "AMPERE_48,ADA_48_PRO,AMPERE_80,ADA_80_PRO",
     "gpuCount": 1,
     "allowedCudaVersions": [
-      "12.7",
-      "12.6",
-      "12.5",
-      "12.4",
-      "12.3",
-      "12.2",
-      "12.1"
+      "12.7", "12.6", "12.5", "12.4", "12.3", "12.2", "12.1"
     ],
     "presets": [
-      {
-        "name": "FLUX.1-dev-juiced (no compilation)",
-        "defaults": {
-          "HF_MODEL": "PrunaAI/FLUX.1-dev-smashed-no-compile"
-        }
-      },
-      {
-        "name": "FLUX.1-dev-juiced (compilation)",
-        "defaults": {
-          "HF_MODEL": "PrunaAI/FLUX.1-dev-smashed"
-        }
-      },
       {
         "name": "FLUX.1-schnell-juiced (no compilation)",
         "defaults": {
@@ -51,7 +33,7 @@
           "type": "huggingface",
           "name": "Hugging Face Model",
           "description": "Pruna AI FLUX model and organization/name as listed on Huggingface Hub",
-          "default": "PrunaAI/FLUX.1-dev-smashed-no-compile"
+          "default": "PrunaAI/FLUX.1-schnell-smashed-no-compile"
         }
       }
     ]

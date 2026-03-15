@@ -18,10 +18,10 @@ class ModelHandler:
         self.load_models()
 
     def load_models(self):
-        # Load FLUX.1-dev pipeline from cache using identifier
+        # Load FLUX.1-schnell pipeline from cache using identifier
 
         self.pipe = PrunaModel.from_hub(
-            os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-dev-smashed-no-compile"),
+            os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-schnell-smashed-no-compile"),
             local_files_only=True,
         )
         self.pipe.move_to_device("cuda")
@@ -52,7 +52,7 @@ def _save_and_upload_images(images, job_id):
 @torch.inference_mode()
 def generate_image(job):
     """
-    Generate an image from text using FLUX.1-dev Model
+    Generate an image from text using FLUX.1-schnell Model
     """
     # -------------------------------------------------------------------------
     # 🐞 DEBUG LOGGING
@@ -107,15 +107,14 @@ def generate_image(job):
     generator = torch.Generator(device).manual_seed(job_input["seed"])
 
     try:
-        # Generate image using FLUX.1-dev pipeline
+        # Generate image using FLUX.1-schnell pipeline
         with torch.inference_mode():
             result = MODELS.pipe(
                 prompt=job_input["prompt"],
-                negative_prompt=job_input["negative_prompt"],
                 height=job_input["height"],
                 width=job_input["width"],
                 num_inference_steps=job_input["num_inference_steps"],
-                guidance_scale=job_input["guidance_scale"],
+                guidance_scale=0.0,
                 num_images_per_prompt=job_input["num_images"],
                 generator=generator,
             )

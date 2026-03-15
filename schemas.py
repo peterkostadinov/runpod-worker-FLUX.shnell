@@ -3,11 +3,6 @@ INPUT_SCHEMA = {
         'type': str,
         'required': False,
     },
-    'negative_prompt': {
-        'type': str,
-        'required': False,
-        'default': None
-    },
     'height': {
         'type': int,
         'required': False,
@@ -26,12 +21,7 @@ INPUT_SCHEMA = {
     'num_inference_steps': {
         'type': int,
         'required': False,
-        'default': 25
-    },
-    'guidance_scale': {
-        'type': float,
-        'required': False,
-        'default': 7.5
+        'default': 4
     },
     'num_images': {
         'type': int,
