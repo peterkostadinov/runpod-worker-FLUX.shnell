@@ -1,45 +1,34 @@
 # base image with cuda 12.1
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04
 
-# install system dependencies
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
+# install only the system packages actually needed
 RUN apt-get update && \
-    apt-get install -y wget curl git vim sudo cmake build-essential \
-    libssl-dev libffi-dev python3-dev python3-venv python3-pip libsndfile1 && \
+    apt-get install -y --no-install-recommends \
+    python3-dev python3-pip git && \
     rm -rf /var/lib/apt/lists/*
 
-# install python packages
-RUN pip3 install packaging psutil pexpect ipywidgets jupyterlab ipykernel \
-    librosa soundfile
+RUN pip3 install --no-cache-dir --upgrade pip
 
-# upgrade pip
-RUN pip3 install --upgrade pip
+# install torch + torchvision first so later packages don't pull a different version
+RUN pip3 install --no-cache-dir \
+    torch==2.7.0 torchvision \
+    --extra-index-url https://download.pytorch.org/whl/cu121
 
-# pre-install deps that cause pip backtracking/build failures with pruna
-RUN pip3 install "numpy<2" "gensim>=4.3.3" && \
-    pip3 install transformers==4.51.3 datasets==3.5.0 llmcompressor==0.5.1 gliner==0.2.13
-
-# install pruna
-RUN pip3 install --no-deps pruna==0.2.5 && \
-    pip3 install pruna==0.2.5
-
-# install ipython kernel
-RUN python3 -m ipykernel install --user --name pruna_cuda12 --display-name "Python (pruna_cuda12)"
-
-# install torch with cuda support
-RUN pip3 install torch --extra-index-url https://download.pytorch.org/whl/cu121
-
-# install remaining dependencies from PyPI
+# install all runtime dependencies (see requirements.txt)
 COPY requirements.txt /requirements.txt
-RUN pip3 install -r /requirements.txt
+RUN pip3 install --no-cache-dir -r /requirements.txt
 
-# copy files
+# install pruna without its full dependency tree (whisper, openvino, etc.)
+# runtime deps for FLUX inference are already covered by requirements.txt
+RUN pip3 install --no-cache-dir --no-deps pruna==0.2.5
+
+# copy application files
 COPY download_weights.py schemas.py handler.py test_input.json /
 
 # download the weights from hugging face
 RUN python3 /download_weights.py
 
-# run the handler
 CMD python3 -u /handler.py

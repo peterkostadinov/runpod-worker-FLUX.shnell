@@ -1,14 +1,33 @@
+# core ML
+numpy<2
+scipy
+triton
 accelerate==1.7.0
 safetensors==0.5.3
 xformers==0.0.30
-runpod==1.7.9
-torch==2.7.0
-torchvision
-numpy>=1.24.0
-scipy
-triton
+
+# diffusion pipeline (used by pruna for FLUX)
+diffusers>=0.37.0
+transformers>=4.51.3
+
+# huggingface
 huggingface-hub
 hf_transfer
 hf_xet
+
+# pruna runtime deps needed for FLUX inference
+ConfigSpace>=1.2.1
+DeepCache
+optimum-quanto>=0.2.5
+torchao
+sentencepiece
+packaging
+pyyaml
+pillow
+psutil
+jsonschema
+platformdirs
+
+# runpod
+runpod==1.7.9
 setuptools
-pruna==0.2.5
