@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Planning / notes
+planning/
+
 # C extensions
 *.so
 
