@@ -17,8 +17,13 @@ RUN pip3 install packaging psutil pexpect ipywidgets jupyterlab ipykernel \
 # upgrade pip
 RUN pip3 install --upgrade pip
 
+# pre-install deps that cause pip backtracking/build failures with pruna
+RUN pip3 install "numpy<2" "gensim>=4.3.3" && \
+    pip3 install transformers==4.51.3 datasets==3.5.0 llmcompressor==0.5.1 gliner==0.2.13
+
 # install pruna
-RUN pip3 install pruna==0.2.5
+RUN pip3 install --no-deps pruna==0.2.5 && \
+    pip3 install pruna==0.2.5
 
 # install ipython kernel
 RUN python3 -m ipykernel install --user --name pruna_cuda12 --display-name "Python (pruna_cuda12)"
