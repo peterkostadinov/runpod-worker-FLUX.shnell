@@ -21,6 +21,7 @@ DeepCache
 optimum-quanto>=0.2.5
 torchao
 sentencepiece
+datasets
 packaging
 pyyaml
 pillow
