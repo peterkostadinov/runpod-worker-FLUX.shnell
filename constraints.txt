@@ -1,0 +1,5 @@
+# Pin versions already installed in the torch layer so pip never
+# uninstalls/reinstalls them when resolving pruna's dependency tree.
+torch==2.7.0
+torchvision==0.22.0
+numpy<2

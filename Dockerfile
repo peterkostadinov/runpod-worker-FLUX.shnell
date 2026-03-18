@@ -17,9 +17,11 @@ RUN pip3 install --no-cache-dir \
     torch==2.7.0 torchvision \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# install all runtime dependencies (see requirements.txt)
+# install all runtime dependencies
+# constraints.txt locks torch/numpy so pruna's dep tree can't swap versions
+COPY constraints.txt /constraints.txt
 COPY requirements.txt /requirements.txt
-RUN pip3 install --no-cache-dir -r /requirements.txt
+RUN pip3 install --no-cache-dir -c /constraints.txt -r /requirements.txt
 
 # copy application files
 COPY download_weights.py schemas.py handler.py test_input.json /
