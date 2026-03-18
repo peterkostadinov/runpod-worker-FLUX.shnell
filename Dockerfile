@@ -21,10 +21,6 @@ RUN pip3 install --no-cache-dir \
 COPY requirements.txt /requirements.txt
 RUN pip3 install --no-cache-dir -r /requirements.txt
 
-# install pruna without its full dependency tree (whisper, openvino, etc.)
-# runtime deps for FLUX inference are already covered by requirements.txt
-RUN pip3 install --no-cache-dir --no-deps pruna==0.2.5
-
 # copy application files
 COPY download_weights.py schemas.py handler.py test_input.json /
 

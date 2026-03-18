@@ -15,19 +15,8 @@ huggingface-hub
 hf_transfer
 hf_xet
 
-# pruna runtime deps needed for FLUX inference
-ConfigSpace>=1.2.1
-DeepCache
-optimum-quanto>=0.2.5
-torchao
-sentencepiece
-datasets
-packaging
-pyyaml
-pillow
-psutil
-jsonschema
-platformdirs
+# pruna (installed with full deps to avoid missing transitive imports)
+pruna==0.2.5
 
 # runpod
 runpod==1.7.9
