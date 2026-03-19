@@ -18,13 +18,11 @@ class ModelHandler:
         self.load_models()
 
     def load_models(self):
-        # Load FLUX.1-schnell pipeline from cache using identifier
-
-        self.pipe = PrunaModel.from_hub(
-            os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-schnell-smashed-no-compile"),
-            local_files_only=True,
-        )
+        model_id = os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-schnell-smashed-no-compile")
+        print(f"[ModelHandler] Loading model: {model_id}", flush=True)
+        self.pipe = PrunaModel.from_hub(model_id)
         self.pipe.move_to_device("cuda")
+        print("[ModelHandler] Model loaded and moved to CUDA", flush=True)
 
 
 MODELS = ModelHandler()
