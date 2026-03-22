@@ -12,16 +12,19 @@ RUN apt-get update && \
 
 RUN pip3 install --no-cache-dir --upgrade pip
 
-# install torch + torchvision first so later packages don't pull a different version
+# install torch + torchvision + xformers together (xformers needs torch at build time)
 RUN pip3 install --no-cache-dir \
-    torch==2.7.0 torchvision \
+    torch==2.7.0 torchvision xformers==0.0.30 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
 # install all runtime dependencies
 COPY requirements.txt /requirements.txt
 RUN pip3 install --no-cache-dir -r /requirements.txt
 
+# enable fast HF downloads at startup
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
 # copy application files
 COPY schemas.py handler.py /
 
-CMD python3 -u /handler.py
+CMD ["python3", "-u", "/handler.py"]

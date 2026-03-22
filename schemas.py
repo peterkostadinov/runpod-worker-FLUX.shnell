@@ -23,6 +23,11 @@ INPUT_SCHEMA = {
         'required': False,
         'default': 4
     },
+    'guidance_scale': {
+        'type': float,
+        'required': False,
+        'default': 0.0
+    },
     'num_images': {
         'type': int,
         'required': False,
