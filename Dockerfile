@@ -16,7 +16,7 @@ RUN pip3 install --no-cache-dir --upgrade pip
 # install torch + torchvision + xformers first from the cu126 index
 # --index-url (not --extra-index-url) forces cu126 wheels matching the CUDA 12.6 base
 RUN pip3 install --no-cache-dir \
-    torch==2.7.1+cu126 torchvision xformers==0.0.30 \
+    torch==2.7.0+cu126 torchvision xformers==0.0.30 \
     --index-url https://download.pytorch.org/whl/cu126
 
 # install all runtime dependencies (flat graph — resolves quickly)
