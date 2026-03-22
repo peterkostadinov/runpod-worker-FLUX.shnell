@@ -34,11 +34,15 @@ RUN pip3 install --no-cache-dir \
 #  because they cause resolution explosions and aren't needed for FLUX inference)
 RUN pip3 install --no-cache-dir --no-deps pruna==0.2.5
 
-# build-time sanity check — will fail the build if gcc or torch are wrong
-RUN gcc --version && python3 -c "import torch; print(f'torch={torch.__version__}, CUDA={torch.version.cuda}')"
-
-# pre-compile triton's CUDA driver module so gcc is NOT needed at runtime
-RUN python3 -c "from triton.runtime.driver import driver; print('triton driver compiled and cached')"
+# build-time sanity check — will fail the build if versions are wrong
+RUN python3 -c "
+import torch, torchao, bitsandbytes
+print(f'torch={torch.__version__}, CUDA={torch.version.cuda}')
+print(f'torchao={torchao.__version__}')
+print(f'bitsandbytes={bitsandbytes.__version__}')
+assert 'cu126' in torch.__version__, f'wrong torch build: {torch.__version__}'
+assert torchao.__version__.startswith('0.15'), f'wrong torchao: {torchao.__version__}'
+"
 
 # copy application files
 COPY schemas.py handler.py /
