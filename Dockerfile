@@ -28,6 +28,6 @@ RUN pip3 install --no-cache-dir -r /requirements.txt
 RUN pip3 install --no-cache-dir --no-deps pruna==0.2.5
 
 # copy application files
-COPY schemas.py handler.py test_input.json /
+COPY schemas.py handler.py /
 
 CMD python3 -u /handler.py
