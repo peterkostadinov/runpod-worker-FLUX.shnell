@@ -1,7 +1,6 @@
 # core ML
 numpy<2
 scipy
-triton
 accelerate==1.7.0
 safetensors==0.5.3
 xformers==0.0.30
