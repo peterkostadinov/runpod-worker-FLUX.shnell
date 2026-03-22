@@ -1,5 +1,5 @@
 # devel image includes gcc, CUDA toolkit & headers (needed by triton at runtime)
-FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
+FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
@@ -13,15 +13,18 @@ RUN apt-get update && \
 
 RUN pip3 install --no-cache-dir --upgrade pip
 
-# install torch + torchvision first so later packages don't pull a different version
-# --index-url (not --extra-index-url) forces cu121 wheel matching the CUDA 12.1 base
+# install torch + torchvision + xformers first from the cu126 index
+# --index-url (not --extra-index-url) forces cu126 wheels matching the CUDA 12.6 base
 RUN pip3 install --no-cache-dir \
-    torch==2.7.0+cu121 torchvision \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch==2.7.1+cu126 torchvision xformers==0.0.30 \
+    --index-url https://download.pytorch.org/whl/cu126
 
 # install all runtime dependencies (flat graph — resolves quickly)
+# --extra-index-url allows cu126 wheels for torchao while still resolving PyPI packages
 COPY requirements.txt /requirements.txt
-RUN pip3 install --no-cache-dir -r /requirements.txt
+RUN pip3 install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    -r /requirements.txt
 
 # install pruna LAST with --no-deps to avoid pip resolution-too-deep
 # (its deps are already satisfied by requirements.txt above;

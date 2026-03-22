@@ -3,7 +3,6 @@ numpy<2
 scipy
 accelerate==1.7.0
 safetensors==0.5.3
-xformers==0.0.30
 
 # diffusion pipeline
 diffusers>=0.37.0
@@ -45,7 +44,7 @@ opentelemetry-exporter-otlp
 
 # optimisation / quantisation backends used by FLUX inference
 optimum-quanto
-torchao
+torchao==0.15.0
 DeepCache
 peft
 torch-pruning
