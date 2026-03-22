@@ -44,7 +44,6 @@ opentelemetry-exporter-otlp
 
 # optimisation / quantisation backends used by FLUX inference
 optimum-quanto
-torchao==0.15.0
 DeepCache
 peft
 torch-pruning
