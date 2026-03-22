@@ -1,11 +1,14 @@
 import base64
+import gc
 import os
 
 import runpod
 import torch
-from diffusers import FluxPipeline
+from diffusers import FluxPipeline, FluxTransformer2DModel
+from optimum.quanto import freeze, qfloat8, quantize
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
+from transformers import T5EncoderModel
 
 from schemas import INPUT_SCHEMA
 
@@ -20,8 +23,35 @@ class ModelHandler:
     def load_models(self):
         model_id = os.environ.get("HF_MODEL", "black-forest-labs/FLUX.1-schnell")
         print(f"[ModelHandler] Loading model: {model_id}", flush=True)
+
+        # Load, quantize, and push transformer to GPU before loading T5.
+        # This keeps peak CPU RAM to ~24 GB (transformer only) instead of ~34 GB.
+        print("[ModelHandler] Loading transformer in bfloat16...", flush=True)
+        transformer = FluxTransformer2DModel.from_pretrained(
+            model_id, subfolder="transformer", torch_dtype=torch.bfloat16
+        )
+        print("[ModelHandler] Quantizing transformer to FP8...", flush=True)
+        quantize(transformer, weights=qfloat8)
+        freeze(transformer)
+        transformer.to("cuda")
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Now load T5 — transformer is already on GPU so CPU RAM is free
+        print("[ModelHandler] Loading T5 text encoder in bfloat16...", flush=True)
+        text_encoder_2 = T5EncoderModel.from_pretrained(
+            model_id, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
+        )
+        print("[ModelHandler] Quantizing T5 text encoder to FP8...", flush=True)
+        quantize(text_encoder_2, weights=qfloat8)
+        freeze(text_encoder_2)
+
+        # Assemble pipeline with pre-quantized components; VAE and CLIP stay in bfloat16
+        print("[ModelHandler] Assembling pipeline...", flush=True)
         self.pipe = FluxPipeline.from_pretrained(
             model_id,
+            transformer=transformer,
+            text_encoder_2=text_encoder_2,
             torch_dtype=torch.bfloat16,
         )
         self.pipe.to("cuda")
@@ -117,6 +147,7 @@ def generate_image(job):
                 num_inference_steps=job_input["num_inference_steps"],
                 guidance_scale=job_input["guidance_scale"],
                 num_images_per_prompt=job_input["num_images"],
+                max_sequence_length=256,
                 generator=generator,
             ).images
     except RuntimeError as err:

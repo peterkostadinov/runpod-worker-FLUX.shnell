@@ -4,6 +4,7 @@ scipy
 triton
 accelerate==1.7.0
 safetensors==0.5.3
+optimum-quanto
 
 # diffusion pipeline
 diffusers>=0.37.0

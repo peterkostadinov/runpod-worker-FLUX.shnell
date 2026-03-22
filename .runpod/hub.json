@@ -3,7 +3,7 @@
   "description": "Generate images with FLUX.1-schnell via Hugging Face Diffusers.",
   "type": "serverless",
   "category": "image",
-  "iconUrl": "https://framerusercontent.com/images/1zpNZDseKMJxNFweAzbVFUyrn8.svg",
+  "iconUrl": "",
   "config": {
     "runsOn": "GPU",
     "containerDiskInGb": 80,

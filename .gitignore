@@ -164,3 +164,4 @@ cython_debug/
 runpod.toml
 test_endpoint.py
 .env.example
+test_outputs/
