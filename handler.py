@@ -5,7 +5,7 @@ import os
 import runpod
 import torch
 from diffusers import FluxPipeline, FluxTransformer2DModel
-from optimum.quanto import freeze, qfloat8, quantize
+from optimum.quanto import freeze, qint8, quantize
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
 from transformers import T5EncoderModel
@@ -30,8 +30,8 @@ class ModelHandler:
         transformer = FluxTransformer2DModel.from_pretrained(
             model_id, subfolder="transformer", torch_dtype=torch.bfloat16
         )
-        print("[ModelHandler] Quantizing transformer to FP8...", flush=True)
-        quantize(transformer, weights=qfloat8)
+        print("[ModelHandler] Quantizing transformer to int8...", flush=True)
+        quantize(transformer, weights=qint8)
         freeze(transformer)
         transformer.to("cuda")
         gc.collect()
@@ -42,8 +42,8 @@ class ModelHandler:
         text_encoder_2 = T5EncoderModel.from_pretrained(
             model_id, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
         )
-        print("[ModelHandler] Quantizing T5 text encoder to FP8...", flush=True)
-        quantize(text_encoder_2, weights=qfloat8)
+        print("[ModelHandler] Quantizing T5 text encoder to int8...", flush=True)
+        quantize(text_encoder_2, weights=qint8)
         freeze(text_encoder_2)
 
         # Assemble pipeline with pre-quantized components; VAE and CLIP stay in bfloat16
