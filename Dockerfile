@@ -1,4 +1,4 @@
-# devel image includes gcc, CUDA toolkit & headers (needed by triton at runtime)
+# devel image includes nvcc, CUDA toolkit & headers (needed by triton at runtime)
 FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -6,9 +6,10 @@ ENV TZ=Etc/UTC
 ENV CC=gcc
 
 # install only the system packages actually needed
+# gcc is required by triton to JIT-compile its CUDA driver module at runtime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    python3-dev python3-pip git && \
+    python3-dev python3-pip git gcc && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir --upgrade pip
