@@ -1,6 +1,6 @@
 {
-  "title": "FLUX.1-schnell-juiced",
-  "description": "Generate images with a Pruna AI optimized FLUX.1-schnell.",
+  "title": "FLUX.1-schnell",
+  "description": "Generate images with FLUX.1-schnell via Hugging Face Diffusers.",
   "type": "serverless",
   "category": "image",
   "iconUrl": "https://framerusercontent.com/images/1zpNZDseKMJxNFweAzbVFUyrn8.svg",
@@ -14,15 +14,9 @@
     ],
     "presets": [
       {
-        "name": "FLUX.1-schnell-juiced (no compilation)",
+        "name": "FLUX.1-schnell (default)",
         "defaults": {
-          "HF_MODEL": "PrunaAI/FLUX.1-schnell-smashed-no-compile"
-        }
-      },
-      {
-        "name": "FLUX.1-schnell-juiced (compilation)",
-        "defaults": {
-          "HF_MODEL": "PrunaAI/FLUX.1-schnell-smashed"
+          "HF_MODEL": "black-forest-labs/FLUX.1-schnell"
         }
       }
     ],
@@ -32,8 +26,8 @@
         "input": {
           "type": "huggingface",
           "name": "Hugging Face Model",
-          "description": "Pruna AI FLUX model and organization/name as listed on Huggingface Hub",
-          "default": "PrunaAI/FLUX.1-schnell-smashed-no-compile"
+          "description": "FLUX model ID as listed on Hugging Face Hub",
+          "default": "black-forest-labs/FLUX.1-schnell"
         }
       }
     ]

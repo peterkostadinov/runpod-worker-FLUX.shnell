@@ -1,18 +1,26 @@
 # RunPod Serverless Worker — FLUX.1-schnell
 
-> **Based on**: [PrunaAI/runpod-worker-FLUX.1-dev](https://github.com/PrunaAI/runpod-worker-FLUX.1-dev) by [PrunaAI](https://pruna.ai). Original optimization and worker architecture by PrunaAI.
+Run [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) as a RunPod serverless endpoint to generate images.
+
+Uses the official `black-forest-labs/FLUX.1-schnell` model via [Hugging Face Diffusers](https://huggingface.co/docs/diffusers) — no third-party wrappers, no telemetry, minimal dependencies.
+
+FLUX.1-schnell is a distilled variant of FLUX.1 that produces high-quality images in just **4 inference steps**, making it significantly faster than FLUX.1-dev. It uses no classifier-free guidance and does not require negative prompts. Licensed under **Apache 2.0**.
 
 ---
 
-Run an optimized [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) as a RunPod serverless endpoint to generate images.
+## Project Structure
 
-FLUX.1-schnell is a distilled variant of FLUX.1 that produces high-quality images in just **4 inference steps**, making it significantly faster than FLUX.1-dev. It uses no classifier-free guidance and does not require negative prompts.
+```
+handler.py           — RunPod serverless handler (model loading + inference)
+schemas.py           — Input validation schema
+download_weights.py  — Pre-download model weights (for Docker build caching)
+Dockerfile           — Container image definition
+requirements.txt     — Python dependencies
+```
 
 ---
 
-## Usage
-
-The worker accepts the following input parameters:
+## Input Parameters
 
 | Parameter             | Type  | Default | Required | Description                                                          |
 | :-------------------- | :---- | :------ | :------- | :------------------------------------------------------------------- |
@@ -21,9 +29,21 @@ The worker accepts the following input parameters:
 | `width`               | `int` | `1024`  | No       | The width of the generated image in pixels                           |
 | `seed`                | `int` | `None`  | No       | Random seed for reproducibility. If `None`, a random seed is generated |
 | `num_inference_steps` | `int` | `4`     | No       | Number of denoising steps (schnell is optimized for 4 steps)         |
-| `num_images`          | `int` | `1`     | No       | Number of images to generate per prompt (Constraint: must be 1 or 2) |
+| `num_images`          | `int` | `1`     | No       | Number of images to generate per prompt (must be 1 or 2)             |
 
-### Step 1 — Submit a Request (`/run`)
+## Output Fields
+
+| Field       | Type     | Description                                                                 |
+| :---------- | :------- | :-------------------------------------------------------------------------- |
+| `image_url` | `str`    | The first generated image (base64 data URI, or S3 URL if bucket configured) |
+| `images`    | `str[]`  | Array of all generated images                                               |
+| `seed`      | `int`    | The seed used (useful for reproducibility)                                  |
+
+---
+
+## Usage
+
+### Submit a Request (`/run`)
 
 Send a POST request to start an image generation job. This is **asynchronous** — it returns a job `id` immediately.
 
@@ -33,7 +53,7 @@ curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/run" \
   -H "Content-Type: application/json" \
   -d '{
     "input": {
-      "prompt": "a knitted purple prune",
+      "prompt": "a tiny astronaut hatching from an egg on the moon",
       "height": 1024,
       "width": 1024,
       "num_inference_steps": 4,
@@ -54,7 +74,7 @@ curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/run" \
 
 > **Tip:** For quick, blocking requests you can use `/runsync` instead of `/run`. It waits for the job to finish and returns the output directly — but it will time out after **30 seconds**.
 
-### Step 2 — Check Job Status (`/status`)
+### Check Job Status (`/status`)
 
 Poll the status endpoint with the job `id` to track progress:
 
@@ -72,7 +92,7 @@ curl "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/status/{JOB_ID}" \
 | `COMPLETED`   | Done — output is available                     |
 | `FAILED`      | An error occurred (check `error` field)        |
 
-### Step 3 — Get the Result
+### Get the Result
 
 Once the status is `COMPLETED`, the response includes the output:
 
@@ -93,18 +113,13 @@ Once the status is `COMPLETED`, the response includes the output:
 }
 ```
 
-- **`image_url`** — The first generated image (base64 data URI or S3 URL if bucket storage is configured).
-- **`images`** — Array of all generated images (when `num_images` > 1).
-- **`seed`** — The seed used (useful for reproducibility).
-
 **To save the image** (base64 response):
 
 ```bash
-# Extract the base64 data and decode it to a file
 echo "<base64_string>" | base64 -d > output.png
 ```
 
-### Step 4 — Cancel a Job (optional)
+### Cancel a Job (optional)
 
 ```bash
 curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/cancel/{JOB_ID}" \
@@ -120,9 +135,8 @@ import base64
 runpod.api_key = "YOUR_RUNPOD_API_KEY"
 endpoint = runpod.Endpoint("YOUR_ENDPOINT_ID")
 
-# Submit and wait for the result
 run = endpoint.run_sync({
-    "prompt": "a knitted purple prune",
+    "prompt": "a tiny astronaut hatching from an egg on the moon",
     "height": 1024,
     "width": 1024,
     "num_inference_steps": 4,
@@ -149,7 +163,7 @@ const response = await fetch(
     },
     body: JSON.stringify({
       input: {
-        prompt: "a knitted purple prune",
+        prompt: "a tiny astronaut hatching from an egg on the moon",
         height: 1024,
         width: 1024,
         num_inference_steps: 4,
@@ -175,17 +189,38 @@ console.log("Image URL:", output.image_url);
 2. Push to your container registry.
 3. Deploy as a RunPod serverless endpoint.
 
-The default model is `PrunaAI/FLUX.1-schnell-smashed-no-compile`. Override via the `HF_MODEL` environment variable.
-
 ### Environment Variables
 
-| Variable              | Description                                                    |
-| :-------------------- | :------------------------------------------------------------- |
-| `HF_MODEL`            | Hugging Face model ID (default: `PrunaAI/FLUX.1-schnell-smashed-no-compile`) |
-| `BUCKET_ENDPOINT_URL` | S3-compatible bucket URL for uploading images instead of returning base64 |
+| Variable              | Default                              | Description                                                      |
+| :-------------------- | :----------------------------------- | :--------------------------------------------------------------- |
+| `HF_MODEL`            | `black-forest-labs/FLUX.1-schnell`   | Hugging Face model ID to load                                    |
+| `BUCKET_ENDPOINT_URL` | *(unset)*                            | S3-compatible bucket URL for image uploads instead of base64     |
+| `HF_TOKEN`            | *(unset)*                            | Hugging Face access token (only needed for gated/private models) |
+
+### Pipeline Settings (hardcoded)
+
+| Setting          | Value          | Reason                                              |
+| :--------------- | :------------- | :-------------------------------------------------- |
+| `torch_dtype`    | `bfloat16`     | Native dtype for FLUX; halves VRAM vs float32       |
+| `guidance_scale` | `0.0`          | Schnell is distilled — CFG is not used              |
 
 ---
 
-## Credits
+## Dependencies
 
-This project is based on the [FLUX.1-dev RunPod worker](https://github.com/PrunaAI/runpod-worker-FLUX.1-dev) by [PrunaAI](https://pruna.ai), adapted for FLUX.1-schnell.
+Minimal dependency footprint — only what's needed:
+
+- **PyTorch 2.7** + CUDA 12.1
+- **Diffusers** — Hugging Face diffusion pipeline
+- **Transformers** — tokenizer / text encoder
+- **Accelerate** — efficient model loading
+- **xformers** — memory-efficient attention
+- **RunPod SDK** — serverless handler
+
+See [requirements.txt](requirements.txt) for the full list.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). The FLUX.1-schnell model itself is licensed under [Apache 2.0](https://huggingface.co/black-forest-labs/FLUX.1-schnell/blob/main/LICENSE.md).

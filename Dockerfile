@@ -17,15 +17,9 @@ RUN pip3 install --no-cache-dir \
     torch==2.7.0 torchvision \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# install all runtime dependencies (flat graph — resolves quickly)
+# install all runtime dependencies
 COPY requirements.txt /requirements.txt
 RUN pip3 install --no-cache-dir -r /requirements.txt
-
-# install pruna LAST with --no-deps to avoid pip resolution-too-deep
-# (its deps are already satisfied by requirements.txt above;
-#  we intentionally skip llmcompressor, librosa, whisper-s2t, ctranslate2
-#  because they cause resolution explosions and aren't needed for FLUX inference)
-RUN pip3 install --no-cache-dir --no-deps pruna==0.2.5
 
 # copy application files
 COPY schemas.py handler.py /

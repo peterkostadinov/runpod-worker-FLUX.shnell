@@ -9,6 +9,8 @@ xformers==0.0.30
 # diffusion pipeline
 diffusers>=0.37.0
 transformers>=4.51.3
+sentencepiece
+protobuf
 
 # huggingface
 huggingface-hub
@@ -18,46 +20,3 @@ hf_xet
 # runpod
 runpod==1.7.9
 setuptools
-
-# ---------------------------------------------------------------------------
-# pruna runtime deps — installed here so pruna can be added with --no-deps
-# (pruna's full dep tree causes pip resolution-too-deep errors)
-# ---------------------------------------------------------------------------
-
-# eagerly imported by pruna.__init__ / SmashConfig / PrunaModel
-pytorch-lightning
-datasets
-ConfigSpace
-jsonschema
-platformdirs
-requests
-protobuf
-sentencepiece
-pyyaml
-tqdm
-Pillow
-ipywidgets
-soundfile
-
-# telemetry (pruna imports opentelemetry at module level)
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-exporter-otlp
-
-# optimisation / quantisation backends used by FLUX inference
-optimum-quanto
-torchao
-DeepCache
-peft
-torch-pruning
-torchmetrics
-
-# other pruna deps (light enough to include)
-bitsandbytes
-hqq
-blobfile
-codecarbon
-lago-python-client
-wget
-optuna
-pynvml

@@ -3,7 +3,7 @@ import os
 
 import runpod
 import torch
-from pruna import PrunaModel
+from diffusers import FluxPipeline
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
 
@@ -18,10 +18,13 @@ class ModelHandler:
         self.load_models()
 
     def load_models(self):
-        model_id = os.environ.get("HF_MODEL", "PrunaAI/FLUX.1-schnell-smashed-no-compile")
+        model_id = os.environ.get("HF_MODEL", "black-forest-labs/FLUX.1-schnell")
         print(f"[ModelHandler] Loading model: {model_id}", flush=True)
-        self.pipe = PrunaModel.from_hub(model_id)
-        self.pipe.move_to_device("cuda")
+        self.pipe = FluxPipeline.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+        )
+        self.pipe.to("cuda")
         print("[ModelHandler] Model loaded and moved to CUDA", flush=True)
 
 
@@ -107,7 +110,7 @@ def generate_image(job):
     try:
         # Generate image using FLUX.1-schnell pipeline
         with torch.inference_mode():
-            result = MODELS.pipe(
+            output = MODELS.pipe(
                 prompt=job_input["prompt"],
                 height=job_input["height"],
                 width=job_input["width"],
@@ -115,8 +118,7 @@ def generate_image(job):
                 guidance_scale=0.0,
                 num_images_per_prompt=job_input["num_images"],
                 generator=generator,
-            )
-            output = result.images
+            ).images
     except RuntimeError as err:
         print(f"[ERROR] RuntimeError in generation pipeline: {err}", flush=True)
         return {
