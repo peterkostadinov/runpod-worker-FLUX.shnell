@@ -1,10 +1,14 @@
 # RunPod Serverless Worker — FLUX.1-schnell
 
-Run [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) as a RunPod serverless endpoint to generate images.
+Run [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) as a RunPod serverless endpoint with **text-to-image**, **image-to-image**, and **inpainting** support.
 
 Uses the official `black-forest-labs/FLUX.1-schnell` model via [Hugging Face Diffusers](https://huggingface.co/docs/diffusers) — no third-party wrappers, no telemetry, minimal dependencies.
 
 FLUX.1-schnell is a distilled variant of FLUX.1 that produces high-quality images in just **4 inference steps**, making it significantly faster than FLUX.1-dev. It uses no classifier-free guidance and does not require negative prompts. Licensed under **Apache 2.0**.
+
+### Memory optimization
+
+The transformer and T5 text encoder are quantized to **int8** via [optimum-quanto](https://github.com/huggingface/optimum-quanto), reducing VRAM from ~34 GB to ~17.5 GB. This allows the model to run on **24 GB GPUs** (RTX 3090, RTX 4090) with room for activations. All three pipelines (txt2img, img2img, inpainting) share the same weights — zero extra VRAM.
 
 ---
 
@@ -13,23 +17,41 @@ FLUX.1-schnell is a distilled variant of FLUX.1 that produces high-quality image
 ```
 handler.py           — RunPod serverless handler (model loading + inference)
 schemas.py           — Input validation schema
-download_weights.py  — Pre-download model weights (for Docker build caching)
+download_weights.py  — Pre-download model weights (optional, for Docker build caching)
 Dockerfile           — Container image definition
 requirements.txt     — Python dependencies
+test_endpoint.py     — Test script for all three modes
 ```
+
+---
+
+## Modes
+
+The worker supports three generation modes via the `mode` parameter:
+
+| Mode          | Description                                           | Requires                    |
+| :------------ | :---------------------------------------------------- | :-------------------------- |
+| `txt2img`     | Generate an image from a text prompt (default)        | `prompt`                    |
+| `img2img`     | Transform a reference image guided by a text prompt   | `prompt`, `image`           |
+| `inpainting`  | Fill a masked region of an image guided by a prompt   | `prompt`, `image`, `mask_image` |
 
 ---
 
 ## Input Parameters
 
-| Parameter             | Type  | Default | Required | Description                                                          |
-| :-------------------- | :---- | :------ | :------- | :------------------------------------------------------------------- |
-| `prompt`              | `str` | `None`  | **Yes**  | The main text prompt describing the desired image.                   |
-| `height`              | `int` | `1024`  | No       | The height of the generated image in pixels                          |
-| `width`               | `int` | `1024`  | No       | The width of the generated image in pixels                           |
-| `seed`                | `int` | `None`  | No       | Random seed for reproducibility. If `None`, a random seed is generated |
-| `num_inference_steps` | `int` | `4`     | No       | Number of denoising steps (schnell is optimized for 4 steps)         |
-| `num_images`          | `int` | `1`     | No       | Number of images to generate per prompt (must be 1 or 2)             |
+| Parameter             | Type    | Default    | Required | Description                                                              |
+| :-------------------- | :------ | :--------- | :------- | :----------------------------------------------------------------------- |
+| `mode`                | `str`   | `txt2img`  | No       | Generation mode: `txt2img`, `img2img`, or `inpainting`                   |
+| `prompt`              | `str`   | `None`     | **Yes**  | Text prompt describing the desired image                                 |
+| `image`               | `str`   | `None`     | img2img/inpainting | Base64-encoded reference image (data URI or raw base64)     |
+| `mask_image`          | `str`   | `None`     | inpainting | Base64-encoded mask (white = area to inpaint, black = keep)            |
+| `strength`            | `float` | `0.75`     | No       | How much to transform the reference image (0.0 = no change, 1.0 = full) |
+| `height`              | `int`   | `1024`     | No       | Height of the generated image in pixels                                  |
+| `width`               | `int`   | `1024`     | No       | Width of the generated image in pixels                                   |
+| `seed`                | `int`   | `None`     | No       | Random seed for reproducibility. If `None`, a random seed is generated   |
+| `num_inference_steps` | `int`   | `4`        | No       | Number of denoising steps (schnell is optimized for 4 steps)             |
+| `guidance_scale`      | `float` | `0.0`      | No       | Classifier-free guidance scale (should be 0.0 for schnell)               |
+| `num_images`          | `int`   | `1`        | No       | Number of images to generate per prompt (1 or 2)                         |
 
 ## Output Fields
 
@@ -43,9 +65,7 @@ requirements.txt     — Python dependencies
 
 ## Usage
 
-### Submit a Request (`/run`)
-
-Send a POST request to start an image generation job. This is **asynchronous** — it returns a job `id` immediately.
+### Text-to-Image (default)
 
 ```bash
 curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/run" \
@@ -57,74 +77,65 @@ curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/run" \
       "height": 1024,
       "width": 1024,
       "num_inference_steps": 4,
-      "seed": 42,
-      "num_images": 1
+      "seed": 42
     }
   }'
 ```
 
-**Response:**
+### Image-to-Image
 
-```json
-{
-  "id": "447f10b8-c745-4c3b-8fad-b1d4ebb7a65b-e1",
-  "status": "IN_QUEUE"
-}
+```bash
+curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/run" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": {
+      "mode": "img2img",
+      "prompt": "same scene in watercolor painting style",
+      "image": "data:image/png;base64,iVBORw0KGgo...",
+      "strength": 0.75,
+      "width": 720,
+      "height": 1280,
+      "num_inference_steps": 4
+    }
+  }'
 ```
 
-> **Tip:** For quick, blocking requests you can use `/runsync` instead of `/run`. It waits for the job to finish and returns the output directly — but it will time out after **30 seconds**.
+### Inpainting
 
-### Check Job Status (`/status`)
+```bash
+curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/run" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": {
+      "mode": "inpainting",
+      "prompt": "a glowing magical portal with blue energy",
+      "image": "data:image/png;base64,iVBORw0KGgo...",
+      "mask_image": "data:image/png;base64,iVBORw0KGgo...",
+      "strength": 0.85,
+      "width": 720,
+      "height": 1280,
+      "num_inference_steps": 4
+    }
+  }'
+```
 
-Poll the status endpoint with the job `id` to track progress:
+> **Mask format:** White pixels = area to regenerate, black pixels = area to preserve.
+
+### Check Job Status
 
 ```bash
 curl "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/status/{JOB_ID}" \
   -H "Authorization: Bearer ${RUNPOD_API_KEY}"
 ```
 
-**Possible statuses:**
-
 | Status        | Meaning                                       |
 | :------------ | :-------------------------------------------- |
-| `IN_QUEUE`    | Job is waiting for a worker to become available |
-| `IN_PROGRESS` | A worker is currently generating images        |
+| `IN_QUEUE`    | Job is waiting for a worker                    |
+| `IN_PROGRESS` | Worker is generating                           |
 | `COMPLETED`   | Done — output is available                     |
 | `FAILED`      | An error occurred (check `error` field)        |
-
-### Get the Result
-
-Once the status is `COMPLETED`, the response includes the output:
-
-```json
-{
-  "id": "447f10b8-c745-4c3b-8fad-b1d4ebb7a65b-e1",
-  "status": "COMPLETED",
-  "delayTime": 2500,
-  "executionTime": 1200,
-  "workerId": "462u6mrq9s28h6",
-  "output": {
-    "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUh...",
-    "images": [
-      "data:image/png;base64,iVBORw0KGgoAAAANSUh..."
-    ],
-    "seed": 42
-  }
-}
-```
-
-**To save the image** (base64 response):
-
-```bash
-echo "<base64_string>" | base64 -d > output.png
-```
-
-### Cancel a Job (optional)
-
-```bash
-curl -X POST "https://api.runpod.ai/v2/{YOUR_ENDPOINT_ID}/cancel/{JOB_ID}" \
-  -H "Authorization: Bearer ${RUNPOD_API_KEY}"
-```
 
 ### Python Example
 
@@ -135,19 +146,30 @@ import base64
 runpod.api_key = "YOUR_RUNPOD_API_KEY"
 endpoint = runpod.Endpoint("YOUR_ENDPOINT_ID")
 
-run = endpoint.run_sync({
+# Text-to-image
+result = endpoint.run_sync({
     "prompt": "a tiny astronaut hatching from an egg on the moon",
-    "height": 1024,
-    "width": 1024,
+    "width": 720,
+    "height": 1280,
     "num_inference_steps": 4,
     "seed": 42,
-    "num_images": 1
 })
 
 # Save the image
-img_data = run["image_url"].split(",")[1]
+img_data = result["image_url"].split(",")[1]
 with open("output.png", "wb") as f:
     f.write(base64.b64decode(img_data))
+
+# Image-to-image (reuse the generated image)
+with open("output.png", "rb") as f:
+    ref_b64 = base64.b64encode(f.read()).decode()
+
+result = endpoint.run_sync({
+    "mode": "img2img",
+    "prompt": "same scene in oil painting style",
+    "image": f"data:image/png;base64,{ref_b64}",
+    "strength": 0.75,
+})
 ```
 
 ### JavaScript Example
@@ -164,11 +186,10 @@ const response = await fetch(
     body: JSON.stringify({
       input: {
         prompt: "a tiny astronaut hatching from an egg on the moon",
-        height: 1024,
-        width: 1024,
+        width: 720,
+        height: 1280,
         num_inference_steps: 4,
         seed: 42,
-        num_images: 1,
       },
     }),
   }
@@ -194,26 +215,27 @@ console.log("Image URL:", output.image_url);
 | Variable              | Default                              | Description                                                      |
 | :-------------------- | :----------------------------------- | :--------------------------------------------------------------- |
 | `HF_MODEL`            | `black-forest-labs/FLUX.1-schnell`   | Hugging Face model ID to load                                    |
+| `HF_TOKEN`            | *(unset)*                            | Hugging Face access token (required — FLUX.1-schnell is gated)   |
 | `BUCKET_ENDPOINT_URL` | *(unset)*                            | S3-compatible bucket URL for image uploads instead of base64     |
-| `HF_TOKEN`            | *(unset)*                            | Hugging Face access token (only needed for gated/private models) |
 
-### Pipeline Settings (hardcoded)
+### Pipeline Settings
 
-| Setting          | Value          | Reason                                              |
-| :--------------- | :------------- | :-------------------------------------------------- |
-| `torch_dtype`    | `bfloat16`     | Native dtype for FLUX; halves VRAM vs float32       |
-| `guidance_scale` | `0.0`          | Schnell is distilled — CFG is not used              |
+| Setting               | Value            | Reason                                                  |
+| :-------------------- | :--------------- | :------------------------------------------------------ |
+| `torch_dtype`         | `bfloat16`       | Native dtype for FLUX; halves VRAM vs float32           |
+| `guidance_scale`      | `0.0` (default)  | Schnell is distilled — CFG is not used                  |
+| `max_sequence_length` | `256`            | Saves ~1-2 GB VRAM; schnell prompts rarely exceed this  |
+| Quantization          | `int8` (quanto)  | Halves transformer + T5 VRAM; fits in 24 GB GPUs        |
 
 ---
 
 ## Dependencies
 
-Minimal dependency footprint — only what's needed:
-
 - **PyTorch 2.7** + CUDA 12.1
-- **Diffusers** — Hugging Face diffusion pipeline
+- **Diffusers** — Hugging Face diffusion pipelines (txt2img, img2img, inpainting)
 - **Transformers** — tokenizer / text encoder
 - **Accelerate** — efficient model loading
+- **optimum-quanto** — int8 weight quantization
 - **xformers** — memory-efficient attention
 - **RunPod SDK** — serverless handler
 

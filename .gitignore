@@ -165,3 +165,4 @@ runpod.toml
 test_endpoint.py
 .env.example
 test_outputs/
+test_img/

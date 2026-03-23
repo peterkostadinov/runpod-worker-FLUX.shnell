@@ -1,11 +1,13 @@
 import base64
 import gc
+import io
 import os
 
 import runpod
 import torch
-from diffusers import FluxPipeline, FluxTransformer2DModel
+from diffusers import FluxImg2ImgPipeline, FluxInpaintPipeline, FluxPipeline, FluxTransformer2DModel
 from optimum.quanto import freeze, qint8, quantize
+from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
 from transformers import T5EncoderModel
@@ -15,9 +17,18 @@ from schemas import INPUT_SCHEMA
 torch.cuda.empty_cache()
 
 
+def _decode_base64_image(b64_string):
+    """Decode a base64-encoded image string to a PIL Image."""
+    if "," in b64_string:
+        b64_string = b64_string.split(",", 1)[1]
+    return Image.open(io.BytesIO(base64.b64decode(b64_string))).convert("RGB")
+
+
 class ModelHandler:
     def __init__(self):
         self.pipe = None
+        self.img2img_pipe = None
+        self.inpaint_pipe = None
         self.load_models()
 
     def load_models(self):
@@ -46,8 +57,8 @@ class ModelHandler:
         quantize(text_encoder_2, weights=qint8)
         freeze(text_encoder_2)
 
-        # Assemble pipeline with pre-quantized components; VAE and CLIP stay in bfloat16
-        print("[ModelHandler] Assembling pipeline...", flush=True)
+        # Assemble txt2img pipeline with pre-quantized components
+        print("[ModelHandler] Assembling pipelines...", flush=True)
         self.pipe = FluxPipeline.from_pretrained(
             model_id,
             transformer=transformer,
@@ -55,7 +66,11 @@ class ModelHandler:
             torch_dtype=torch.bfloat16,
         )
         self.pipe.to("cuda")
-        print("[ModelHandler] Model loaded and moved to CUDA", flush=True)
+
+        # Create img2img and inpaint pipelines sharing all weights (zero extra VRAM)
+        self.img2img_pipe = FluxImg2ImgPipeline(**self.pipe.components)
+        self.inpaint_pipe = FluxInpaintPipeline(**self.pipe.components)
+        print("[ModelHandler] All pipelines ready", flush=True)
 
 
 MODELS = ModelHandler()
@@ -138,18 +153,46 @@ def generate_image(job):
     generator = torch.Generator(device).manual_seed(job_input["seed"])
 
     try:
-        # Generate image using FLUX.1-schnell pipeline
+        mode = job_input.get("mode", "txt2img")
+        common_kwargs = dict(
+            prompt=job_input["prompt"],
+            height=job_input["height"],
+            width=job_input["width"],
+            num_inference_steps=job_input["num_inference_steps"],
+            guidance_scale=job_input["guidance_scale"],
+            num_images_per_prompt=job_input["num_images"],
+            max_sequence_length=256,
+            generator=generator,
+        )
+
         with torch.inference_mode():
-            output = MODELS.pipe(
-                prompt=job_input["prompt"],
-                height=job_input["height"],
-                width=job_input["width"],
-                num_inference_steps=job_input["num_inference_steps"],
-                guidance_scale=job_input["guidance_scale"],
-                num_images_per_prompt=job_input["num_images"],
-                max_sequence_length=256,
-                generator=generator,
-            ).images
+            if mode == "img2img":
+                if not job_input.get("image"):
+                    return {"error": "img2img mode requires an 'image' field"}
+                init_image = _decode_base64_image(job_input["image"])
+                output = MODELS.img2img_pipe(
+                    image=init_image,
+                    strength=job_input["strength"],
+                    **common_kwargs,
+                ).images
+
+            elif mode == "inpainting":
+                if not job_input.get("image"):
+                    return {"error": "inpainting mode requires an 'image' field"}
+                if not job_input.get("mask_image"):
+                    return {"error": "inpainting mode requires a 'mask_image' field"}
+                init_image = _decode_base64_image(job_input["image"])
+                mask = _decode_base64_image(job_input["mask_image"])
+                output = MODELS.inpaint_pipe(
+                    image=init_image,
+                    mask_image=mask,
+                    strength=job_input["strength"],
+                    **common_kwargs,
+                ).images
+
+            else:
+                output = MODELS.pipe(**common_kwargs).images
+
     except RuntimeError as err:
         print(f"[ERROR] RuntimeError in generation pipeline: {err}", flush=True)
         return {
