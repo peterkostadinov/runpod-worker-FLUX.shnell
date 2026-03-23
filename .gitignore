@@ -163,5 +163,7 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 runpod.toml
-
 test_endpoint.py
+.env.example
+test_outputs/
+test_img/

@@ -14,37 +14,21 @@ RUN apt-get update && \
 
 RUN pip3 install --no-cache-dir --upgrade pip
 
-# install torch + torchvision + xformers + torchao from the cu126 index
-# --index-url (not --extra-index-url) forces cu126 wheels matching the CUDA 12.6 base
-# torchao pinned here (not in requirements.txt) to prevent pip resolving 0.16.0 from cu126
+# install torch + torchvision + xformers together (xformers needs torch at build time)
 RUN pip3 install --no-cache-dir \
-    torch==2.7.0+cu126 torchvision xformers==0.0.30 torchao==0.15.0 \
-    --index-url https://download.pytorch.org/whl/cu126
+    torch==2.7.0 torchvision xformers==0.0.30 \
+    --extra-index-url https://download.pytorch.org/whl/cu121
 
-# install all runtime dependencies (flat graph — resolves quickly)
-# --extra-index-url allows cu126 wheels for torchao while still resolving PyPI packages
+# install all runtime dependencies
 COPY requirements.txt /requirements.txt
 RUN pip3 install --no-cache-dir \
     --extra-index-url https://download.pytorch.org/whl/cu126 \
     -r /requirements.txt
 
-# install pruna LAST with --no-deps to avoid pip resolution-too-deep
-# (its deps are already satisfied by requirements.txt above;
-#  we intentionally skip llmcompressor, librosa, whisper-s2t, ctranslate2
-#  because they cause resolution explosions and aren't needed for FLUX inference)
-RUN pip3 install --no-cache-dir --no-deps pruna==0.2.5
-
-# build-time sanity check — will fail the build if versions are wrong
-RUN python3 -c "
-import torch, torchao, bitsandbytes
-print(f'torch={torch.__version__}, CUDA={torch.version.cuda}')
-print(f'torchao={torchao.__version__}')
-print(f'bitsandbytes={bitsandbytes.__version__}')
-assert 'cu126' in torch.__version__, f'wrong torch build: {torch.__version__}'
-assert torchao.__version__.startswith('0.15'), f'wrong torchao: {torchao.__version__}'
-"
+# enable fast HF downloads at startup
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
 # copy application files
 COPY schemas.py handler.py /
 
-CMD python3 -u /handler.py
+CMD ["python3", "-u", "/handler.py"]
