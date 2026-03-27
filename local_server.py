@@ -2,7 +2,9 @@
 Local FastAPI server for FLUX.1-schnell on a single GPU (e.g. 3090 24 GB).
 
 Start:
-    python local_server.py
+    API_KEY=your-secret-key python local_server.py
+
+If API_KEY is not set, a random key is generated and printed at startup.
 
 Endpoints:
     POST /generate   — JSON body, returns generated image(s) as base64
@@ -13,6 +15,7 @@ import base64
 import gc
 import io
 import os
+import secrets
 import warnings
 
 warnings.filterwarnings(
@@ -28,8 +31,9 @@ from diffusers import (
     FluxPipeline,
     FluxTransformer2DModel,
 )
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from optimum.quanto import freeze, qint8, quantize
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -120,6 +124,20 @@ def load_models():
 
 
 # ---------------------------------------------------------------------------
+# API key auth
+# ---------------------------------------------------------------------------
+
+API_KEY = os.environ.get("API_KEY") or secrets.token_urlsafe(32)
+
+security = HTTPBearer()
+
+
+def _verify_key(creds: HTTPAuthorizationCredentials = Security(security)):
+    if not secrets.compare_digest(creds.credentials, API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
@@ -142,6 +160,7 @@ inpaint_pipe: FluxInpaintPipeline = None  # type: ignore[assignment]
 async def startup():
     global pipe, img2img_pipe, inpaint_pipe
     pipe, img2img_pipe, inpaint_pipe = load_models()
+    print(f"[local_server] API_KEY = {API_KEY}", flush=True)
 
 
 @app.get("/health")
@@ -151,7 +170,7 @@ async def health():
 
 @app.post("/generate", response_model=GenerateResponse)
 @torch.inference_mode()
-def generate(req: GenerateRequest):
+def generate(req: GenerateRequest, _key=Depends(_verify_key)):
     seed = req.seed if req.seed is not None else int.from_bytes(os.urandom(2), "big")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = torch.Generator(device).manual_seed(seed)
