@@ -314,4 +314,4 @@ def generate_image(job):
     return results
 
 
-runpod.serverless.start({"handler": generate_image})
+runpod.serverless.start({"handler": generate_image}, rp_serve_api=True)
