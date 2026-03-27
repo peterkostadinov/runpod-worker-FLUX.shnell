@@ -13,7 +13,7 @@ warnings.filterwarnings(
 import runpod
 import torch
 from diffusers import FluxImg2ImgPipeline, FluxInpaintPipeline, FluxPipeline, FluxTransformer2DModel
-from optimum.quanto import freeze, qint8, quantize
+from optimum.quanto import QuantizedDiffusersModel, QuantizedTransformersModel, freeze, qint8, quantize
 from transformers import T5EncoderModel
 from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
@@ -22,6 +22,21 @@ from runpod.serverless.utils.rp_validator import validate
 from schemas import INPUT_SCHEMA
 
 torch.cuda.empty_cache()
+
+
+# Sub-classes required by optimum.quanto to save/load quantized model weights.
+class _QuantizedFluxTransformer(QuantizedDiffusersModel):
+    frozen_model_class = FluxTransformer2DModel
+    auto_class = None
+
+
+class _QuantizedT5Encoder(QuantizedTransformersModel):
+    frozen_model_class = T5EncoderModel
+    auto_class = None
+
+
+# Stored inside the persisted hf_cache volume so quantized weights survive restarts.
+_QUANTO_CACHE = "/root/.cache/huggingface/quanto_cache"
 
 
 def _decode_base64_image(b64_string):
@@ -42,29 +57,55 @@ class ModelHandler:
         model_id = os.environ.get("HF_MODEL", "black-forest-labs/FLUX.1-schnell")
         print(f"[ModelHandler] Loading model: {model_id}", flush=True)
 
-        # low_cpu_mem_usage=True avoids keeping a second CPU buffer during loading,
-        # reducing peak RAM. quantize() replaces weights in-place layer-by-layer.
-        print("[ModelHandler] Loading transformer in bfloat16...", flush=True)
-        transformer = FluxTransformer2DModel.from_pretrained(
-            model_id, subfolder="transformer", torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-        )
-        print("[ModelHandler] Quantizing transformer to int8...", flush=True)
-        quantize(transformer, weights=qint8)
-        freeze(transformer)
-        transformer.to("cuda")
-        gc.collect()
-        torch.cuda.empty_cache()
+        model_slug = model_id.replace("/", "--")
+        transformer_cache = os.path.join(_QUANTO_CACHE, model_slug, "transformer")
+        t5_cache = os.path.join(_QUANTO_CACHE, model_slug, "text_encoder_2")
 
-        # Now load T5 — transformer is already on GPU so CPU RAM is free
-        print("[ModelHandler] Loading T5 text encoder in bfloat16...", flush=True)
-        text_encoder_2 = T5EncoderModel.from_pretrained(
-            model_id, subfolder="text_encoder_2", torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-        )
-        print("[ModelHandler] Quantizing T5 text encoder to int8...", flush=True)
-        quantize(text_encoder_2, weights=qint8)
-        freeze(text_encoder_2)
+        if os.path.isdir(transformer_cache) and os.path.isdir(t5_cache):
+            # --- Warm start: load already-quantized weights from the cache volume ---
+            print("[ModelHandler] Loading pre-quantized transformer from cache...", flush=True)
+            transformer = _QuantizedFluxTransformer.from_pretrained(transformer_cache)._wrapped
+            transformer.to("cuda")
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            print("[ModelHandler] Loading pre-quantized T5 encoder from cache...", flush=True)
+            text_encoder_2 = _QuantizedT5Encoder.from_pretrained(t5_cache)._wrapped
+        else:
+            # --- First run: quantize from float weights, then persist to cache ---
+            # low_cpu_mem_usage=True avoids keeping a second CPU buffer during loading,
+            # reducing peak RAM. quantize() replaces weights in-place layer-by-layer.
+            print("[ModelHandler] Loading transformer in bfloat16...", flush=True)
+            transformer = FluxTransformer2DModel.from_pretrained(
+                model_id, subfolder="transformer", torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            )
+            print("[ModelHandler] Quantizing transformer to int8...", flush=True)
+            quantize(transformer, weights=qint8)
+            freeze(transformer)
+            print("[ModelHandler] Saving quantized transformer to cache...", flush=True)
+            try:
+                _QuantizedFluxTransformer(transformer).save_pretrained(transformer_cache)
+            except Exception as exc:
+                print(f"[ModelHandler] Warning: could not cache transformer: {exc}", flush=True)
+            transformer.to("cuda")
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # Now load T5 — transformer is already on GPU so CPU RAM is free
+            print("[ModelHandler] Loading T5 text encoder in bfloat16...", flush=True)
+            text_encoder_2 = T5EncoderModel.from_pretrained(
+                model_id, subfolder="text_encoder_2", torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            )
+            print("[ModelHandler] Quantizing T5 text encoder to int8...", flush=True)
+            quantize(text_encoder_2, weights=qint8)
+            freeze(text_encoder_2)
+            print("[ModelHandler] Saving quantized T5 encoder to cache...", flush=True)
+            try:
+                _QuantizedT5Encoder(text_encoder_2).save_pretrained(t5_cache)
+            except Exception as exc:
+                print(f"[ModelHandler] Warning: could not cache T5 encoder: {exc}", flush=True)
 
         # Assemble txt2img pipeline with pre-quantized components
         print("[ModelHandler] Assembling pipelines...", flush=True)
