@@ -14,9 +14,14 @@ services:
     volumes:
       # Persist downloaded model weights across container restarts
       - hf_cache:/root/.cache/huggingface
+      # Mount test input locally only — not baked into the image so RunPod won't auto-run it
+      - ./test_input.json:/test_input.json:ro
     deploy:
       resources:
+        limits:
+          memory: 24G
         reservations:
+          memory: 16G
           devices:
             - driver: nvidia
               count: 1

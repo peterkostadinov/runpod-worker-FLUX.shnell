@@ -1,0 +1,8 @@
+{
+  "input": {
+    "prompt": "a cat sitting on a moon, photorealistic",
+    "width": 1024,
+    "height": 1024,
+    "num_inference_steps": 4
+  }
+}
