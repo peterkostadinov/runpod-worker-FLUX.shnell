@@ -13,7 +13,7 @@ warnings.filterwarnings(
 import runpod
 import torch
 from diffusers import FluxImg2ImgPipeline, FluxInpaintPipeline, FluxPipeline, FluxTransformer2DModel
-from optimum.quanto import freeze, qint8, quantize
+from optimum.quanto import QuantoConfig, freeze
 from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
@@ -42,26 +42,28 @@ class ModelHandler:
         model_id = os.environ.get("HF_MODEL", "black-forest-labs/FLUX.1-schnell")
         print(f"[ModelHandler] Loading model: {model_id}", flush=True)
 
-        # Load, quantize, and push transformer to GPU before loading T5.
-        # This keeps peak CPU RAM to ~24 GB (transformer only) instead of ~34 GB.
-        print("[ModelHandler] Loading transformer in bfloat16...", flush=True)
+        # Load, quantize layer-by-layer during loading (avoids holding bfloat16 + quantized
+        # copies simultaneously), then push to GPU. Peak CPU RAM ~12 GB instead of ~36 GB.
+        print("[ModelHandler] Loading transformer and quantizing to int8...", flush=True)
         transformer = FluxTransformer2DModel.from_pretrained(
-            model_id, subfolder="transformer", torch_dtype=torch.bfloat16
+            model_id,
+            subfolder="transformer",
+            torch_dtype=torch.bfloat16,
+            quantization_config=QuantoConfig(weights="int8"),
         )
-        print("[ModelHandler] Quantizing transformer to int8...", flush=True)
-        quantize(transformer, weights=qint8)
         freeze(transformer)
         transformer.to("cuda")
         gc.collect()
         torch.cuda.empty_cache()
 
         # Now load T5 — transformer is already on GPU so CPU RAM is free
-        print("[ModelHandler] Loading T5 text encoder in bfloat16...", flush=True)
+        print("[ModelHandler] Loading T5 text encoder and quantizing to int8...", flush=True)
         text_encoder_2 = T5EncoderModel.from_pretrained(
-            model_id, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
+            model_id,
+            subfolder="text_encoder_2",
+            torch_dtype=torch.bfloat16,
+            quantization_config=QuantoConfig(weights="int8"),
         )
-        print("[ModelHandler] Quantizing T5 text encoder to int8...", flush=True)
-        quantize(text_encoder_2, weights=qint8)
         freeze(text_encoder_2)
 
         # Assemble txt2img pipeline with pre-quantized components
