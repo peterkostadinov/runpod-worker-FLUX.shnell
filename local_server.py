@@ -18,6 +18,10 @@ import os
 import secrets
 import warnings
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 warnings.filterwarnings(
     "ignore",
     message=".*CLIP can only handle sequences up to 77 tokens.*",
