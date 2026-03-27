@@ -13,11 +13,11 @@ warnings.filterwarnings(
 import runpod
 import torch
 from diffusers import FluxImg2ImgPipeline, FluxInpaintPipeline, FluxPipeline, FluxTransformer2DModel
-from optimum.quanto import QuantoConfig, freeze
+from optimum.quanto import freeze
+from transformers import QuantoConfig, T5EncoderModel
 from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
-from transformers import T5EncoderModel
 
 from schemas import INPUT_SCHEMA
 
