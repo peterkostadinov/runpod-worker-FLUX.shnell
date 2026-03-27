@@ -19,8 +19,12 @@ handler.py           — RunPod serverless handler (model loading + inference)
 schemas.py           — Input validation schema
 download_weights.py  — Pre-download model weights (optional, for Docker build caching)
 Dockerfile           — Container image definition
+docker-compose.yml   — Run the worker locally with GPU passthrough
 requirements.txt     — Python dependencies
-test_endpoint.py     — Test script for all three modes
+.env.example         — Environment variable template
+test_endpoint.py     — Test script for the cloud RunPod endpoint
+test_local.py        — Test script for the local Docker worker
+local_server.py      — Standalone FastAPI server (no Docker, requires local CUDA PyTorch)
 ```
 
 ---
@@ -201,21 +205,85 @@ console.log("Image URL:", output.image_url);
 
 ---
 
+## Local Development (Docker)
+
+The easiest way to run the worker locally on a GPU machine is via Docker Compose — the image has CUDA PyTorch baked in, so there are no local Python environment requirements.
+
+### Prerequisites
+
+- Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed
+- An NVIDIA GPU with 24 GB+ VRAM (RTX 3090 / 4090 recommended)
+- A Hugging Face account with access to [FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
+
+### Setup
+
+```bash
+# 1. Copy the env template and fill in your tokens
+cp .env.example .env
+# Edit .env:
+#   HF_TOKEN=hf_...   ← required — FLUX.1-schnell is a gated model
+#   API_KEY=...       ← optional, only needed for local_server.py
+
+# 2. Build the image and start the worker
+#    (first run downloads ~24 GB of model weights — cached in a Docker volume)
+docker compose up --build
+```
+
+The RunPod SDK detects it is running outside of RunPod infrastructure and starts a local HTTP server on **port 8000**. Model weights are persisted in a named Docker volume (`hf_cache`) so they are only downloaded once.
+
+### Test the local worker
+
+```bash
+python test_local.py
+```
+
+This hits `POST /runsync` with `{"input": {...}}` — exactly the same handler function and payload format used in production. Results are saved to `test_outputs/`.
+
+### Local server HTTP API
+
+| Method | Path       | Auth         | Description                        |
+| :----- | :--------- | :----------- | :--------------------------------- |
+| `GET`  | `/health`  | None         | Liveness check                     |
+| `POST` | `/runsync` | None         | Synchronous generation (RunPod SDK)|
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8000/runsync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": {
+      "prompt": "a tiny astronaut hatching from an egg on the moon",
+      "width": 1024,
+      "height": 1024,
+      "num_inference_steps": 4,
+      "seed": 42
+    }
+  }'
+```
+
+---
+
 ## Deployment
 
-1. Build the Docker image:
+1. Copy and configure environment variables:
+   ```bash
+   cp .env.example .env
+   ```
+2. Build the Docker image:
    ```bash
    docker build -t flux-schnell-worker .
    ```
-2. Push to your container registry.
-3. Deploy as a RunPod serverless endpoint.
+3. Push to your container registry.
+4. Deploy as a RunPod serverless endpoint.
 
 ### Environment Variables
 
 | Variable              | Default                              | Description                                                      |
 | :-------------------- | :----------------------------------- | :--------------------------------------------------------------- |
+| `HF_TOKEN`            | *(unset)*                            | Hugging Face access token (**required** — FLUX.1-schnell is gated) |
 | `HF_MODEL`            | `black-forest-labs/FLUX.1-schnell`   | Hugging Face model ID to load                                    |
-| `HF_TOKEN`            | *(unset)*                            | Hugging Face access token (required — FLUX.1-schnell is gated)   |
+| `API_KEY`             | *(auto-generated)*                   | Bearer token for `local_server.py` (not needed for Docker worker)|
 | `BUCKET_ENDPOINT_URL` | *(unset)*                            | S3-compatible bucket URL for image uploads instead of base64     |
 
 ### Pipeline Settings

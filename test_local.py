@@ -1,12 +1,17 @@
 """
-Test the local FLUX.1-schnell server (local_server.py).
+Test the local FLUX.1-schnell worker running inside Docker.
 
 Usage:
-    # Make sure the server is running first:
-    #   API_KEY=test python local_server.py
+    # Build and start the container (first run downloads ~24 GB of weights):
+    #   docker compose up --build
     #
-    # Then run:
-    API_KEY=test python test_local.py
+    # Then run (from the host, no API key needed for RunPod's local server):
+    #   python test_local.py
+
+The RunPod SDK starts a local HTTP server on port 8000 when handler.py
+runs outside of RunPod infrastructure.  The synchronous endpoint is
+  POST /runsync   body: {"input": {...}}
+and the response is:  {"output": {...}, "status": "COMPLETED"}
 """
 
 import os
@@ -17,24 +22,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.environ.get("API_KEY", "test")
 BASE_URL = os.environ.get("LOCAL_SERVER_URL", "http://localhost:8000")
 
-HEADERS = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {API_KEY}",
-}
+HEADERS = {"Content-Type": "application/json"}
 
 
 def generate(payload: dict) -> dict:
-    """Send a synchronous generate request and return the JSON response."""
-    resp = requests.post(f"{BASE_URL}/generate", json=payload, headers=HEADERS)
+    """Send a synchronous request to the RunPod local server and return the output dict."""
+    resp = requests.post(f"{BASE_URL}/runsync", json={"input": payload}, headers=HEADERS)
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    if data.get("status") == "FAILED":
+        raise RuntimeError(f"Worker error: {data}")
+    return data.get("output", {})
 
 
 def save_images(result: dict, prefix: str = "output"):
-    """Save base64-encoded images from the result to disk."""
+    """Save base64-encoded images from the output dict to disk."""
     images = result.get("images", [])
     if not images:
         print("No images in result.")
