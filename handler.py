@@ -26,13 +26,11 @@ torch.cuda.empty_cache()
 
 # Sub-classes required by optimum.quanto to save/load quantized model weights.
 class _QuantizedFluxTransformer(QuantizedDiffusersModel):
-    frozen_model_class = FluxTransformer2DModel
-    auto_class = None
+    base_class = FluxTransformer2DModel
 
 
 class _QuantizedT5Encoder(QuantizedTransformersModel):
-    frozen_model_class = T5EncoderModel
-    auto_class = None
+    base_class = T5EncoderModel
 
 
 # Stored inside the persisted hf_cache volume so quantized weights survive restarts.
