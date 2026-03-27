@@ -2,6 +2,13 @@ import base64
 import gc
 import io
 import os
+import warnings
+
+# CLIP has a hard 77-token limit; FLUX relies on T5 for long prompts — suppress the noise.
+warnings.filterwarnings(
+    "ignore",
+    message=".*CLIP can only handle sequences up to 77 tokens.*",
+)
 
 import runpod
 import torch
