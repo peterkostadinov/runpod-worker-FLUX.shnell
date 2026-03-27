@@ -14,8 +14,6 @@ services:
     volumes:
       # Persist downloaded model weights across container restarts
       - hf_cache:/root/.cache/huggingface
-      # Mount test input locally only — not baked into the image so RunPod won't auto-run it
-      - ./test_input.json:/test_input.json:ro
     deploy:
       resources:
         limits:
@@ -26,6 +24,15 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  # Run with: docker compose run --rm worker-test
+  # Processes test_input.json once then exits — does NOT start the persistent server.
+  worker-test:
+    extends:
+      service: worker
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - ./test_input.json:/test_input.json:ro
 
 volumes:
   hf_cache:
