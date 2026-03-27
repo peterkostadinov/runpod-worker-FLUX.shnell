@@ -111,6 +111,7 @@ class ModelHandler:
                 qmap = json.load(f)
             state_dict = _load_safetensors(transformer_cache, xf_weights)
             requantize(transformer, state_dict=state_dict, quantization_map=qmap)
+            del state_dict
             transformer.to(dtype=torch.bfloat16)
             transformer.to("cuda")
             gc.collect()
@@ -124,6 +125,8 @@ class ModelHandler:
                 qmap = json.load(f)
             state_dict = _load_safetensors(t5_cache, t5_weights)
             requantize(text_encoder_2, state_dict=state_dict, quantization_map=qmap)
+            del state_dict
+            gc.collect()
             text_encoder_2.to(dtype=torch.bfloat16)
         else:
             # --- First run: quantize from float weights, then persist to cache ---

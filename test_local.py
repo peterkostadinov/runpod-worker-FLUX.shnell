@@ -113,7 +113,7 @@ def test_img2img(reference_image_path: str = None):
 
     result = generate({
         "mode": "img2img",
-        "prompt": "Same tiger tank but on an intense battlefield with explosions",
+        "prompt": "Remove all background, leave only the central object. Then replace the background with a futuristic city at sunset, cyberpunk style",
         "image": image_b64,
         "strength": 0.75,
         "width": 1280,
