@@ -17,7 +17,7 @@ import runpod
 import torch
 from diffusers import FluxImg2ImgPipeline, FluxInpaintPipeline, FluxPipeline, FluxTransformer2DModel
 from accelerate import init_empty_weights
-from optimum.quanto import freeze, get_quantization_map, qint8, quantize, requantize
+from optimum.quanto import freeze, quantization_map, qint8, quantize, requantize
 from transformers import T5Config, T5EncoderModel
 from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
@@ -65,7 +65,7 @@ def _save_cache(model, cache_dir: str, **save_kwargs) -> bool:
     try:
         os.makedirs(cache_dir, exist_ok=True)
         model.save_pretrained(cache_dir, **save_kwargs)
-        qmap = get_quantization_map(model)
+        qmap = quantization_map(model)
         with open(os.path.join(cache_dir, "quanto_qmap.json"), "w", encoding="utf-8") as f:
             json.dump(qmap, f, indent=4)
         return True
