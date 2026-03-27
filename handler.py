@@ -1,8 +1,11 @@
 import base64
 import gc
 import io
+import json
 import os
 import warnings
+
+import safetensors.torch
 
 # CLIP has a hard 77-token limit; FLUX relies on T5 for long prompts — suppress the noise.
 warnings.filterwarnings(
@@ -13,8 +16,9 @@ warnings.filterwarnings(
 import runpod
 import torch
 from diffusers import FluxImg2ImgPipeline, FluxInpaintPipeline, FluxPipeline, FluxTransformer2DModel
-from optimum.quanto import QuantizedDiffusersModel, QuantizedTransformersModel, freeze, qint8, quantize
-from transformers import T5EncoderModel
+from accelerate import init_empty_weights
+from optimum.quanto import freeze, get_quantization_map, qint8, quantize, requantize
+from transformers import T5Config, T5EncoderModel
 from PIL import Image
 from runpod.serverless.utils import rp_cleanup, rp_upload
 from runpod.serverless.utils.rp_validator import validate
@@ -24,17 +28,51 @@ from schemas import INPUT_SCHEMA
 torch.cuda.empty_cache()
 
 
-# Sub-classes required by optimum.quanto to save/load quantized model weights.
-class _QuantizedFluxTransformer(QuantizedDiffusersModel):
-    base_class = FluxTransformer2DModel
-
-
-class _QuantizedT5Encoder(QuantizedTransformersModel):
-    base_class = T5EncoderModel
-
-
 # Stored inside the persisted hf_cache volume so quantized weights survive restarts.
 _QUANTO_CACHE = "/root/.cache/huggingface/quanto_cache"
+
+
+def _cache_valid(path: str, weights_file: str) -> bool:
+    """Return True only when every file needed for a warm-start load is present."""
+    return (
+        os.path.isdir(path)
+        and os.path.isfile(os.path.join(path, "quanto_qmap.json"))
+        and (
+            os.path.isfile(os.path.join(path, weights_file))
+            or os.path.isfile(os.path.join(path, weights_file + ".index.json"))
+        )
+    )
+
+
+def _load_safetensors(directory: str, weights_file: str) -> dict:
+    """Load a (possibly sharded) safetensors checkpoint into a state dict."""
+    single = os.path.join(directory, weights_file)
+    if os.path.isfile(single):
+        return safetensors.torch.load_file(single, device="cpu")
+    # Sharded checkpoint
+    index_path = single + ".index.json"
+    with open(index_path, "r", encoding="utf-8") as f:
+        weight_map = json.load(f)["weight_map"]
+    state_dict: dict = {}
+    for shard in set(weight_map.values()):
+        state_dict.update(safetensors.torch.load_file(os.path.join(directory, shard), device="cpu"))
+    return state_dict
+
+
+def _save_cache(model, cache_dir: str, **save_kwargs) -> bool:
+    """Save a quantized model + its quantization map. Returns False on failure."""
+    import shutil
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        model.save_pretrained(cache_dir, **save_kwargs)
+        qmap = get_quantization_map(model)
+        with open(os.path.join(cache_dir, "quanto_qmap.json"), "w", encoding="utf-8") as f:
+            json.dump(qmap, f, indent=4)
+        return True
+    except Exception as exc:
+        print(f"[ModelHandler] Warning: cache save failed ({exc}); removing partial cache", flush=True)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        return False
 
 
 def _decode_base64_image(b64_string):
@@ -59,16 +97,32 @@ class ModelHandler:
         transformer_cache = os.path.join(_QUANTO_CACHE, model_slug, "transformer")
         t5_cache = os.path.join(_QUANTO_CACHE, model_slug, "text_encoder_2")
 
-        if os.path.isdir(transformer_cache) and os.path.isdir(t5_cache):
+        # diffusers saves as diffusion_pytorch_model.safetensors; transformers as model.safetensors
+        xf_weights = "diffusion_pytorch_model.safetensors"
+        t5_weights = "model.safetensors"
+
+        if _cache_valid(transformer_cache, xf_weights) and _cache_valid(t5_cache, t5_weights):
             # --- Warm start: load already-quantized weights from the cache volume ---
             print("[ModelHandler] Loading pre-quantized transformer from cache...", flush=True)
-            transformer = _QuantizedFluxTransformer.from_pretrained(transformer_cache)._wrapped
+            cfg = FluxTransformer2DModel.load_config(transformer_cache)
+            with init_empty_weights():
+                transformer = FluxTransformer2DModel.from_config(cfg)
+            with open(os.path.join(transformer_cache, "quanto_qmap.json"), encoding="utf-8") as f:
+                qmap = json.load(f)
+            state_dict = _load_safetensors(transformer_cache, xf_weights)
+            requantize(transformer, state_dict=state_dict, quantization_map=qmap)
             transformer.to("cuda")
             gc.collect()
             torch.cuda.empty_cache()
 
             print("[ModelHandler] Loading pre-quantized T5 encoder from cache...", flush=True)
-            text_encoder_2 = _QuantizedT5Encoder.from_pretrained(t5_cache)._wrapped
+            cfg = T5Config.from_pretrained(t5_cache)
+            with init_empty_weights():
+                text_encoder_2 = T5EncoderModel(cfg)
+            with open(os.path.join(t5_cache, "quanto_qmap.json"), encoding="utf-8") as f:
+                qmap = json.load(f)
+            state_dict = _load_safetensors(t5_cache, t5_weights)
+            requantize(text_encoder_2, state_dict=state_dict, quantization_map=qmap)
         else:
             # --- First run: quantize from float weights, then persist to cache ---
             # low_cpu_mem_usage=True avoids keeping a second CPU buffer during loading,
@@ -82,10 +136,7 @@ class ModelHandler:
             quantize(transformer, weights=qint8)
             freeze(transformer)
             print("[ModelHandler] Saving quantized transformer to cache...", flush=True)
-            try:
-                _QuantizedFluxTransformer(transformer).save_pretrained(transformer_cache)
-            except Exception as exc:
-                print(f"[ModelHandler] Warning: could not cache transformer: {exc}", flush=True)
+            _save_cache(transformer, transformer_cache)
             transformer.to("cuda")
             gc.collect()
             torch.cuda.empty_cache()
@@ -100,10 +151,8 @@ class ModelHandler:
             quantize(text_encoder_2, weights=qint8)
             freeze(text_encoder_2)
             print("[ModelHandler] Saving quantized T5 encoder to cache...", flush=True)
-            try:
-                _QuantizedT5Encoder(text_encoder_2).save_pretrained(t5_cache)
-            except Exception as exc:
-                print(f"[ModelHandler] Warning: could not cache T5 encoder: {exc}", flush=True)
+            # max_shard_size forces a single file, keeping the load path simple
+            _save_cache(text_encoder_2, t5_cache, max_shard_size="20GB")
 
         # Assemble txt2img pipeline with pre-quantized components
         print("[ModelHandler] Assembling pipelines...", flush=True)
