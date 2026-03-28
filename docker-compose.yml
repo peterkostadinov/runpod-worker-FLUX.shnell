@@ -73,9 +73,11 @@ services:
 
   # ---------------------------------------------------------------------------
   # RunPod handler smoke-test — runs handler.py exactly as RunPod does.
+  # Excluded from `docker compose up` by the "test" profile.
   # Run with:  docker compose run --rm worker-test
   # ---------------------------------------------------------------------------
   worker-test:
+    profiles: ["test"]
     build: .
     command: ["python3", "-u", "/handler.py"]
     env_file:
