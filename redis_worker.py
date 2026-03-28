@@ -1,30 +1,193 @@
-"""FLUX.1-schnell — Redis-backed GPU inference worker.
+"""FLUX.1-schnell — Redis queue bridge.
 
-Polls `flux:jobs:queue` via BLPOP, runs inference, writes results back.
-Shares the same hf_cache volume as `handler.py` so quantized weights are
-reused and do not have to be re-computed between restarts.
+Dequeues jobs from Redis (BLPOP), forwards each one to the RunPod handler's
+local HTTP API (POST /runsync on the `worker` service), saves the generated
+images to the shared /images volume, writes the result back to Redis with a
+60-minute TTL, and deletes image files when their Redis key expires.
 
-Start locally (outside Docker):
-    REDIS_URL=redis://localhost:6379 python redis_worker.py
+No ML code here — all model loading and inference live inside handler.py.
 
-With Docker Compose:
-    docker compose up worker
+Start with Docker Compose:
+    docker compose up redis_worker
 """
 
 import base64
-import gc
-import io
 import json
 import os
+import threading
 import time
-import warnings
 
-import safetensors.torch
+import redis
+import requests
+from dotenv import load_dotenv
 
-warnings.filterwarnings(
-    "ignore",
-    message=".*CLIP can only handle sequences up to 77 tokens.*",
-)
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+REDIS_URL  = os.environ.get("REDIS_URL",  "redis://redis:6379")
+WORKER_URL = os.environ.get("WORKER_URL", "http://worker:8000")
+QUEUE_KEY  = "flux:jobs:queue"
+IMAGE_DIR  = os.environ.get("IMAGE_DIR",  "/images")
+JOB_TTL    = 60 * 60       # 60 minutes — Redis key TTL after job completes
+WORKER_RETRY_DELAY = 5     # seconds between retries when worker is not yet ready
+WORKER_TIMEOUT     = 300   # seconds to wait for a single /runsync call
+
+rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+
+# ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
+
+def save_images(job_id: str, images: list) -> int:
+    """Decode base64 data-URI images and write them to IMAGE_DIR.
+    Returns the number of files saved."""
+    os.makedirs(IMAGE_DIR, exist_ok=True)
+    saved = 0
+    for i, data_uri in enumerate(images):
+        if isinstance(data_uri, str) and data_uri.startswith("data:image"):
+            b64 = data_uri.split(",", 1)[1]
+            path = os.path.join(IMAGE_DIR, f"{job_id}_{i}.png")
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64))
+            saved += 1
+    return saved
+
+
+def delete_images(job_id: str):
+    """Remove all stored image files for a job."""
+    deleted, i = 0, 0
+    while True:
+        path = os.path.join(IMAGE_DIR, f"{job_id}_{i}.png")
+        if os.path.isfile(path):
+            os.remove(path)
+            deleted += 1
+            i += 1
+        else:
+            break
+    if deleted:
+        print(f"[redis_worker] Deleted {deleted} image(s) for expired job {job_id}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Keyspace expiry listener — daemon thread
+# ---------------------------------------------------------------------------
+
+def keyspace_listener():
+    """Subscribe to Redis key-expired events; delete image files on TTL expiry."""
+    # Needs its own connection — pub/sub blocks the connection.
+    ps_rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    pubsub = ps_rdb.pubsub()
+    pubsub.psubscribe("__keyevent@0__:expired")
+    for message in pubsub.listen():
+        if message["type"] not in ("pmessage", "message"):
+            continue
+        key = message.get("data", "")
+        if isinstance(key, str) and key.startswith("flux:job:"):
+            delete_images(key[len("flux:job:"):])
+
+
+# ---------------------------------------------------------------------------
+# Worker proxy
+# ---------------------------------------------------------------------------
+
+def post_to_worker(job_input: dict) -> dict:
+    """POST to /runsync on the handler; retry until the worker is reachable."""
+    while True:
+        try:
+            resp = requests.post(
+                f"{WORKER_URL}/runsync",
+                json={"input": job_input},
+                timeout=WORKER_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.ConnectionError:
+            print(
+                f"[redis_worker] Worker not reachable at {WORKER_URL}, "
+                f"retrying in {WORKER_RETRY_DELAY}s…",
+                flush=True,
+            )
+            time.sleep(WORKER_RETRY_DELAY)
+
+
+# ---------------------------------------------------------------------------
+# Job processor
+# ---------------------------------------------------------------------------
+
+def process_job(job_id: str):
+    job_key = f"flux:job:{job_id}"
+
+    # Skip jobs cancelled while waiting in the queue.
+    status = rdb.hget(job_key, "status")
+    if status != "IN_QUEUE":
+        print(f"[redis_worker] Skipping job {job_id} (status={status})", flush=True)
+        return
+
+    rdb.hset(job_key, mapping={"status": "IN_PROGRESS", "started_at": str(time.time())})
+    print(f"[redis_worker] Processing job {job_id}", flush=True)
+
+    try:
+        job_input = json.loads(rdb.hget(job_key, "input"))
+        result = post_to_worker(job_input)
+
+        if result.get("status") == "FAILED":
+            raise RuntimeError(result.get("output", {}).get("error", "Worker returned FAILED"))
+
+        output = result.get("output", {})
+        images = output.get("images", [])
+
+        # Persist images and replace data-URIs with serve paths.
+        save_images(job_id, images)
+        output["images"]    = [f"/image/{job_id}/{i}" for i in range(len(images))]
+        output["image_url"] = output["images"][0] if output["images"] else ""
+
+        rdb.hset(job_key, mapping={
+            "status":       "COMPLETED",
+            "output":       json.dumps(output),
+            "completed_at": str(time.time()),
+        })
+        rdb.expire(job_key, JOB_TTL)
+        print(f"[redis_worker] Job {job_id} completed (TTL={JOB_TTL}s)", flush=True)
+
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        rdb.hset(job_key, mapping={
+            "status":       "FAILED",
+            "error":        str(exc),
+            "completed_at": str(time.time()),
+        })
+        rdb.expire(job_key, JOB_TTL)
+        print(f"[redis_worker] Job {job_id} FAILED: {exc}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    print(f"[redis_worker] Redis:      {REDIS_URL}", flush=True)
+    print(f"[redis_worker] Worker URL: {WORKER_URL}", flush=True)
+
+    # Start keyspace expiry listener in the background.
+    threading.Thread(target=keyspace_listener, daemon=True).start()
+
+    print("[redis_worker] Waiting for jobs…", flush=True)
+    while True:
+        result = rdb.blpop(QUEUE_KEY, timeout=0)
+        if result is None:
+            continue
+        _, job_id = result
+        process_job(job_id)
+
+
+if __name__ == "__main__":
+    main()
+
 
 import redis
 import torch

@@ -1,11 +1,14 @@
 services:
 
   # ---------------------------------------------------------------------------
-  # Queue broker — persisted to a named volume so jobs survive restarts.
+  # 1. Queue broker
+  #    notify-keyspace-events Ex enables TTL-expiry events that redis_worker
+  #    uses to delete image files when a job record expires.
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command: redis-server --notify-keyspace-events Ex
     ports:
       - "6379:6379"
     volumes:
@@ -17,8 +20,10 @@ services:
       retries: 10
 
   # ---------------------------------------------------------------------------
-  # API gateway — accepts job submissions, returns IDs, serves /status.
-  # No GPU needed.  local_server.py is bind-mounted so Dockerfile stays clean.
+  # 2. API gateway
+  #    Lightweight FastAPI: accepts job submissions, serves status + images.
+  #    No GPU, no model weights.  local_server.py is bind-mounted so the
+  #    Dockerfile stays untouched.
   # ---------------------------------------------------------------------------
   api:
     build: .
@@ -28,33 +33,32 @@ services:
     env_file:
       - .env
     environment:
-      # Set API_KEY in .env; if blank a random key is printed at startup.
       - API_KEY=${API_KEY:-}
       - REDIS_URL=redis://redis:6379
+      - IMAGE_DIR=/images
     volumes:
       - ./local_server.py:/local_server.py:ro
+      - image_store:/images
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # GPU inference worker — polls Redis BLPOP, runs FLUX, writes results back.
-  # Shares hf_cache with worker-test so weights are downloaded only once.
-  # redis_worker.py is bind-mounted so Dockerfile stays clean.
+  # 3. GPU inference worker
+  #    Runs handler.py as a RunPod-style local HTTP server (--rp_serve_api).
+  #    Only reachable internally by redis_worker — no external port binding.
   # ---------------------------------------------------------------------------
   worker:
     build: .
-    command: ["python3", "-u", "/redis_worker.py"]
+    command: ["python3", "-u", "/handler.py", "--rp_serve_api", "--rp_api_host", "0.0.0.0"]
     env_file:
       - .env
     environment:
       - HF_TOKEN=${HF_TOKEN}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
       - HF_MODEL=${HF_MODEL:-black-forest-labs/FLUX.1-schnell}
-      - REDIS_URL=redis://redis:6379
     volumes:
-      - ./redis_worker.py:/redis_worker.py:ro
       - hf_cache:/root/.cache/huggingface
     depends_on:
       redis:
@@ -65,16 +69,42 @@ services:
         limits:
           memory: 24G
         reservations:
-          memory: 20G
+          memory: 16G
           devices:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
 
   # ---------------------------------------------------------------------------
-  # RunPod handler smoke-test — runs handler.py exactly as RunPod does.
-  # Excluded from `docker compose up` by the "test" profile.
-  # Run with:  docker compose run --rm worker-test
+  # 4. Redis queue bridge
+  #    BLPOPs jobs from Redis, POSTs them to worker /runsync, saves the
+  #    returned images to the shared volume, writes results back to Redis with
+  #    a 60-min TTL, and deletes image files when the TTL fires.
+  #    No GPU needed.  redis_worker.py is bind-mounted.
+  # ---------------------------------------------------------------------------
+  redis_worker:
+    build: .
+    command: ["python3", "-u", "/redis_worker.py"]
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - WORKER_URL=http://worker:8000
+      - IMAGE_DIR=/images
+    volumes:
+      - ./redis_worker.py:/redis_worker.py:ro
+      - image_store:/images
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 5. RunPod handler smoke-test (excluded from `docker compose up`)
+  #    Runs handler.py exactly as RunPod does — processes test_input.json
+  #    and exits.  Run with:  docker compose run --rm worker-test
   # ---------------------------------------------------------------------------
   worker-test:
     profiles: ["test"]
@@ -94,7 +124,7 @@ services:
         limits:
           memory: 24G
         reservations:
-          memory: 20G
+          memory: 16G
           devices:
             - driver: nvidia
               count: 1
@@ -103,3 +133,5 @@ services:
 volumes:
   hf_cache:
   redis_data:
+  image_store:
+

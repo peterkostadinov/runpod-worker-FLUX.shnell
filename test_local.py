@@ -59,7 +59,7 @@ def generate(payload: dict) -> dict:
 
 
 def save_images(result: dict, prefix: str = "output"):
-    """Save base64-encoded images from the output dict to disk."""
+    """Download images from the API and save them to disk."""
     images = result.get("images", [])
     if not images:
         print("No images in result.")
@@ -67,9 +67,16 @@ def save_images(result: dict, prefix: str = "output"):
 
     os.makedirs("test_outputs", exist_ok=True)
     for i, img_data in enumerate(images):
-        if isinstance(img_data, str) and img_data.startswith("data:image"):
+        path = os.path.join("test_outputs", f"{prefix}_{i}.png")
+        if isinstance(img_data, str) and img_data.startswith("/image/"):
+            # Images are stored on the server — download via the API.
+            resp = requests.get(f"{BASE_URL}{img_data}", headers=HEADERS)
+            resp.raise_for_status()
+            with open(path, "wb") as f:
+                f.write(resp.content)
+            print(f"  Saved {path}")
+        elif isinstance(img_data, str) and img_data.startswith("data:image"):
             b64 = img_data.split(",", 1)[1]
-            path = os.path.join("test_outputs", f"{prefix}_{i}.png")
             with open(path, "wb") as f:
                 f.write(base64.b64decode(b64))
             print(f"  Saved {path}")
@@ -77,6 +84,16 @@ def save_images(result: dict, prefix: str = "output"):
             print(f"  Image URL: {img_data}")
         else:
             print(f"  Unknown image format: {str(img_data)[:120]}")
+
+
+def fetch_as_base64(img_data: str) -> str:
+    """Return a data-URI base64 string from either an API path or an existing data-URI."""
+    if img_data.startswith("/image/"):
+        resp = requests.get(f"{BASE_URL}{img_data}", headers=HEADERS)
+        resp.raise_for_status()
+        b64 = base64.b64encode(resp.content).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
+    return img_data  # already a data-URI
 
 
 def image_to_base64(path: str) -> str:
@@ -130,7 +147,7 @@ def test_img2img(reference_image_path: str = None):
         if not images:
             print("  Failed to generate reference image.")
             return
-        image_b64 = images[0]
+        image_b64 = fetch_as_base64(images[0])
 
     result = generate({
         "mode": "img2img",
@@ -159,7 +176,7 @@ def test_inpainting(reference_image_path: str = None):
         if not images:
             print("  Failed to generate reference image.")
             return
-        image_b64 = images[0]
+        image_b64 = fetch_as_base64(images[0])
 
     mask_b64 = create_test_mask(720, 1280)
     result = generate({

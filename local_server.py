@@ -1,176 +1,57 @@
-"""
-Local FastAPI server for FLUX.1-schnell on a single GPU (e.g. 3090 24 GB).
+"""FLUX.1-schnell Job Queue API — Redis-backed gateway.
 
-Start:
-    API_KEY=your-secret-key python local_server.py
+Accepts job submissions from your platform, pushes them onto a Redis queue,
+and lets callers poll for results.  All model loading and inference runs in
+the separate `worker` container (redis_worker.py); this process is
+intentionally lightweight and has no ML dependencies.
 
-If API_KEY is not set, a random key is generated and printed at startup.
+Start locally (outside Docker):
+    REDIS_URL=redis://localhost:6379 API_KEY=secret uvicorn local_server:app
+
+With Docker Compose:
+    docker compose up
 
 Endpoints:
-    POST /generate          — synchronous: blocks until image is ready, returns base64
-    POST /run               — async: queues job, returns {id} immediately (RunPod-compatible)
-    GET  /status/{job_id}   — poll job status; output is populated when COMPLETED
-    POST /cancel/{job_id}   — cancel a queued job
-    GET  /health            — liveness check
+    POST /run               — queue a job; returns {"id": "...", "status": "IN_QUEUE"}
+    GET  /status/{job_id}   — poll status; output is populated when COMPLETED
+    POST /cancel/{job_id}   — cancel a queued (not yet started) job
+    GET  /health            — liveness + Redis connectivity check
 """
 
-import asyncio
-import base64
-import gc
-import io
+import json
 import os
 import secrets
 import time
 import uuid
-import warnings
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-warnings.filterwarnings(
-    "ignore",
-    message=".*CLIP can only handle sequences up to 77 tokens.*",
-)
-
-import torch
+import redis.asyncio as aioredis
 import uvicorn
-from diffusers import (
-    FluxImg2ImgPipeline,
-    FluxInpaintPipeline,
-    FluxPipeline,
-    FluxTransformer2DModel,
-)
 from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from optimum.quanto import freeze, qint8, quantize
-from PIL import Image
 from pydantic import BaseModel, Field
-from transformers import T5EncoderModel
 
 # ---------------------------------------------------------------------------
-# Pydantic request / response models
+# Config
 # ---------------------------------------------------------------------------
 
-class GenerateRequest(BaseModel):
-    mode: str = Field("txt2img", pattern="^(txt2img|img2img|inpainting)$")
-    prompt: str = "a photo of a cat"
-    image: Optional[str] = None          # base64-encoded image for img2img / inpainting
-    mask_image: Optional[str] = None     # base64-encoded mask for inpainting
-    strength: float = Field(0.75, ge=0.0, le=1.0)
-    height: int = Field(1024, ge=256, le=2048)
-    width: int = Field(1024, ge=256, le=2048)
-    seed: Optional[int] = None
-    num_inference_steps: int = Field(4, ge=1, le=50)
-    guidance_scale: float = Field(0.0, ge=0.0, le=20.0)
-    num_images: int = Field(1, ge=1, le=2)
-
-
-class GenerateResponse(BaseModel):
-    images: List[str]
-    image_url: str
-    seed: int
-
-
-# ---------------------------------------------------------------------------
-# Job queue models
-# ---------------------------------------------------------------------------
-
-class JobStatus(str, Enum):
-    IN_QUEUE = "IN_QUEUE"
-    IN_PROGRESS = "IN_PROGRESS"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
-
-
-class RunRequest(BaseModel):
-    """RunPod-compatible job submission wrapper."""
-    input: GenerateRequest
-
-
-class JobSubmitResponse(BaseModel):
-    id: str
-    status: JobStatus
-
-
-class JobStatusResponse(BaseModel):
-    id: str
-    status: JobStatus
-    output: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    created_at: float
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _decode_base64_image(b64_string: str) -> Image.Image:
-    if "," in b64_string:
-        b64_string = b64_string.split(",", 1)[1]
-    return Image.open(io.BytesIO(base64.b64decode(b64_string))).convert("RGB")
-
-
-def _pil_to_data_uri(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-
-
-# ---------------------------------------------------------------------------
-# Model loading (same quantisation strategy as handler.py)
-# ---------------------------------------------------------------------------
-
-def load_models():
-    model_id = os.environ.get("HF_MODEL", "black-forest-labs/FLUX.1-schnell")
-    print(f"[local_server] Loading model: {model_id}", flush=True)
-
-    print("[local_server] Loading transformer (bfloat16)…", flush=True)
-    transformer = FluxTransformer2DModel.from_pretrained(
-        model_id, subfolder="transformer", torch_dtype=torch.bfloat16
-    )
-    print("[local_server] Quantizing transformer → int8…", flush=True)
-    quantize(transformer, weights=qint8)
-    freeze(transformer)
-    transformer.to("cuda")
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    print("[local_server] Loading T5 text encoder (bfloat16)…", flush=True)
-    text_encoder_2 = T5EncoderModel.from_pretrained(
-        model_id, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
-    )
-    print("[local_server] Quantizing T5 → int8…", flush=True)
-    quantize(text_encoder_2, weights=qint8)
-    freeze(text_encoder_2)
-
-    print("[local_server] Assembling pipelines…", flush=True)
-    pipe = FluxPipeline.from_pretrained(
-        model_id,
-        transformer=transformer,
-        text_encoder_2=text_encoder_2,
-        torch_dtype=torch.bfloat16,
-    )
-    pipe.to("cuda")
-
-    img2img_pipe = FluxImg2ImgPipeline(**pipe.components)
-    inpaint_pipe = FluxInpaintPipeline(**pipe.components)
-
-    print("[local_server] All pipelines ready ✓", flush=True)
-    return pipe, img2img_pipe, inpaint_pipe
-
-
-# ---------------------------------------------------------------------------
-# API key auth
-# ---------------------------------------------------------------------------
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
+QUEUE_KEY = "flux:jobs:queue"
+IMAGE_DIR = os.environ.get("IMAGE_DIR", "/images")
+JOB_TTL = 24 * 60 * 60  # seconds — job data auto-expires after 24 h
 
 API_KEY = os.environ.get("API_KEY") or secrets.token_urlsafe(32)
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
 
 security = HTTPBearer()
 
@@ -181,10 +62,41 @@ def _verify_key(creds: HTTPAuthorizationCredentials = Security(security)):
 
 
 # ---------------------------------------------------------------------------
-# FastAPI app
+# Schemas
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="FLUX.1-schnell Local Server")
+class JobStatus(str, Enum):
+    IN_QUEUE = "IN_QUEUE"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class GenerateRequest(BaseModel):
+    mode: str = Field("txt2img", pattern="^(txt2img|img2img|inpainting)$")
+    prompt: str = "a photo of a cat"
+    image: Optional[str] = None          # base64-encoded source image (img2img / inpainting)
+    mask_image: Optional[str] = None     # base64-encoded mask (inpainting only)
+    strength: float = Field(0.75, ge=0.0, le=1.0)
+    height: int = Field(1024, ge=256, le=2048)
+    width: int = Field(1024, ge=256, le=2048)
+    seed: Optional[int] = None
+    num_inference_steps: int = Field(4, ge=1, le=50)
+    guidance_scale: float = Field(0.0, ge=0.0, le=20.0)
+    num_images: int = Field(1, ge=1, le=2)
+
+
+class RunRequest(BaseModel):
+    """RunPod-compatible job submission wrapper."""
+    input: GenerateRequest
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="FLUX.1-schnell Job Queue API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -193,165 +105,103 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pipelines are loaded once at startup
-pipe: FluxPipeline = None  # type: ignore[assignment]
-img2img_pipe: FluxImg2ImgPipeline = None  # type: ignore[assignment]
-inpaint_pipe: FluxInpaintPipeline = None  # type: ignore[assignment]
-
-# Job queue — populated by /run, drained by _queue_worker
-_job_store: Dict[str, Dict[str, Any]] = {}
-_job_queue: asyncio.Queue  # type: ignore[assignment]  — set in startup
-_inference_lock: asyncio.Lock  # type: ignore[assignment]  — set in startup
-
-
-# ---------------------------------------------------------------------------
-# Inference core
-# ---------------------------------------------------------------------------
-
-def _run_inference(req: GenerateRequest) -> GenerateResponse:
-    """Blocking GPU inference — called from a ThreadPoolExecutor."""
-    seed = req.seed if req.seed is not None else int.from_bytes(os.urandom(2), "big")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    generator = torch.Generator(device).manual_seed(seed)
-
-    common_kwargs = dict(
-        prompt=req.prompt,
-        height=req.height,
-        width=req.width,
-        num_inference_steps=req.num_inference_steps,
-        guidance_scale=req.guidance_scale,
-        num_images_per_prompt=req.num_images,
-        max_sequence_length=256,
-        generator=generator,
-    )
-
-    with torch.inference_mode():
-        if req.mode == "img2img":
-            if not req.image:
-                raise ValueError("img2img mode requires an 'image' field")
-            init_image = _decode_base64_image(req.image)
-            images = img2img_pipe(
-                image=init_image, strength=req.strength, **common_kwargs
-            ).images
-
-        elif req.mode == "inpainting":
-            if not req.image:
-                raise ValueError("inpainting mode requires an 'image' field")
-            if not req.mask_image:
-                raise ValueError("inpainting mode requires a 'mask_image' field")
-            init_image = _decode_base64_image(req.image)
-            mask = _decode_base64_image(req.mask_image)
-            images = inpaint_pipe(
-                image=init_image, mask_image=mask, strength=req.strength, **common_kwargs
-            ).images
-
-        else:  # txt2img
-            images = pipe(**common_kwargs).images
-
-    image_urls = [_pil_to_data_uri(img) for img in images]
-    return GenerateResponse(images=image_urls, image_url=image_urls[0], seed=seed)
-
-
-async def _queue_worker() -> None:
-    """Drains _job_queue one job at a time; inference runs in a thread pool."""
-    loop = asyncio.get_event_loop()
-    while True:
-        job_id: str = await _job_queue.get()
-        job = _job_store.get(job_id)
-        if job is None or job["status"] == JobStatus.CANCELLED:
-            _job_queue.task_done()
-            continue
-
-        job["status"] = JobStatus.IN_PROGRESS
-        job["started_at"] = time.time()
-        try:
-            async with _inference_lock:
-                result: GenerateResponse = await loop.run_in_executor(
-                    None, _run_inference, job["input"]
-                )
-            job["status"] = JobStatus.COMPLETED
-            job["output"] = result.model_dump()
-        except Exception as exc:
-            job["status"] = JobStatus.FAILED
-            job["error"] = str(exc)
-            print(f"[queue_worker] Job {job_id} failed: {exc}", flush=True)
-        finally:
-            job["completed_at"] = time.time()
-            _job_queue.task_done()
+rdb: aioredis.Redis = None  # type: ignore[assignment]
 
 
 @app.on_event("startup")
 async def startup():
-    global pipe, img2img_pipe, inpaint_pipe, _job_queue, _inference_lock
-    pipe, img2img_pipe, inpaint_pipe = load_models()
-    _job_queue = asyncio.Queue()
-    _inference_lock = asyncio.Lock()
-    asyncio.create_task(_queue_worker())
-    print(f"[local_server] API_KEY = {API_KEY}", flush=True)
+    global rdb
+    rdb = aioredis.Redis.from_url(REDIS_URL, decode_responses=True)
+    print(f"[api] Redis: {REDIS_URL}", flush=True)
+    print(f"[api] API_KEY = {API_KEY}", flush=True)
 
+
+@app.on_event("shutdown")
+async def shutdown():
+    await rdb.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model_loaded": pipe is not None}
+    try:
+        await rdb.ping()
+        redis_ok = True
+    except Exception:
+        redis_ok = False
+    return {"status": "ok", "redis": redis_ok}
 
 
-@app.post("/generate", response_model=GenerateResponse)
-async def generate(req: GenerateRequest, _key=Depends(_verify_key)):
-    """Synchronous endpoint — holds the connection open until the image is ready."""
-    loop = asyncio.get_event_loop()
-    async with _inference_lock:
-        return await loop.run_in_executor(None, _run_inference, req)
-
-
-@app.post("/run", response_model=JobSubmitResponse, status_code=202)
+@app.post("/run", status_code=202)
 async def submit_job(req: RunRequest, _key=Depends(_verify_key)):
-    """Queue a job and return immediately with a job ID. Poll /status/{id} for the result."""
+    """Queue a generation job. Returns immediately with a job ID."""
     job_id = str(uuid.uuid4())
-    _job_store[job_id] = {
+    job_data = {
         "id": job_id,
         "status": JobStatus.IN_QUEUE,
-        "input": req.input,
-        "output": None,
-        "error": None,
-        "created_at": time.time(),
-        "started_at": None,
-        "completed_at": None,
+        "input": req.input.model_dump_json(),
+        "output": "",
+        "error": "",
+        "created_at": str(time.time()),
+        "started_at": "",
+        "completed_at": "",
     }
-    await _job_queue.put(job_id)
-    return JobSubmitResponse(id=job_id, status=JobStatus.IN_QUEUE)
+    async with rdb.pipeline() as pipe:
+        await pipe.hset(f"flux:job:{job_id}", mapping=job_data)
+        await pipe.expire(f"flux:job:{job_id}", JOB_TTL)
+        await pipe.rpush(QUEUE_KEY, job_id)
+        await pipe.execute()
+    return {"id": job_id, "status": JobStatus.IN_QUEUE}
 
 
-@app.get("/status/{job_id}", response_model=JobStatusResponse)
+@app.get("/status/{job_id}")
 async def job_status(job_id: str, _key=Depends(_verify_key)):
     """Poll a job. When status is COMPLETED, output contains the generation result."""
-    job = _job_store.get(job_id)
-    if job is None:
+    job = await rdb.hgetall(f"flux:job:{job_id}")
+    if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
-    return JobStatusResponse(
-        id=job["id"],
-        status=job["status"],
-        output=job["output"],
-        error=job["error"],
-        created_at=job["created_at"],
-        started_at=job["started_at"],
-        completed_at=job["completed_at"],
-    )
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "output": json.loads(job["output"]) if job.get("output") else None,
+        "error": job.get("error") or None,
+        "created_at": float(job["created_at"]) if job.get("created_at") else None,
+        "started_at": float(job["started_at"]) if job.get("started_at") else None,
+        "completed_at": float(job["completed_at"]) if job.get("completed_at") else None,
+    }
 
 
 @app.post("/cancel/{job_id}")
 async def cancel_job(job_id: str, _key=Depends(_verify_key)):
     """Cancel a queued job. Has no effect on in-progress or completed jobs."""
-    job = _job_store.get(job_id)
-    if job is None:
+    job_key = f"flux:job:{job_id}"
+    status = await rdb.hget(job_key, "status")
+    if status is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
-    if job["status"] == JobStatus.IN_QUEUE:
-        job["status"] = JobStatus.CANCELLED
-        job["completed_at"] = time.time()
-    return {"id": job_id, "status": job["status"]}
+    if status == JobStatus.IN_QUEUE:
+        await rdb.hset(job_key, mapping={
+            "status": JobStatus.CANCELLED,
+            "completed_at": str(time.time()),
+        })
+        status = JobStatus.CANCELLED
+    return {"id": job_id, "status": status}
+
+
+@app.get("/image/{job_id}/{index}")
+async def serve_image(job_id: str, index: int, _key=Depends(_verify_key)):
+    """Download a generated image file by job ID and image index."""
+    path = os.path.join(IMAGE_DIR, f"{job_id}_{index}.png")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Image not found or expired")
+    return FileResponse(path, media_type="image/png")
 
 
 # ---------------------------------------------------------------------------
-# Run with:  python local_server.py
+# Entry point
 # ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
