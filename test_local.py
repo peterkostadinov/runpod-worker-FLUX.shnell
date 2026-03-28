@@ -1,21 +1,20 @@
-"""
-Test the local FLUX.1-schnell worker running inside Docker.
+"""Test the local FLUX.1-schnell worker running via Docker Compose.
 
 Usage:
-    # Build and start the container (first run downloads ~24 GB of weights):
+    # Build and start all services (first run downloads ~24 GB of weights):
     #   docker compose up --build
     #
-    # Then run (from the host, no API key needed for RunPod's local server):
+    # Then run (set API_KEY in .env or pass it directly):
     #   python test_local.py
+    #   API_KEY=my-secret python test_local.py
 
-The RunPod SDK starts a local HTTP server on port 8000 when handler.py
-runs outside of RunPod infrastructure.  The synchronous endpoint is
-  POST /runsync   body: {"input": {...}}
-and the response is:  {"output": {...}, "status": "COMPLETED"}
+The API gateway is at http://localhost:8000.
+Jobs are submitted to POST /run, then polled via GET /status/{id}.
 """
 
 import os
 import base64
+import time
 import requests
 from io import BytesIO
 from dotenv import load_dotenv
@@ -23,18 +22,40 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_URL = os.environ.get("LOCAL_SERVER_URL", "http://localhost:8000")
+API_KEY = os.environ.get("API_KEY", "")
 
-HEADERS = {"Content-Type": "application/json"}
+HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {API_KEY}",
+}
+
+POLL_INTERVAL = 2    # seconds between status checks
+POLL_TIMEOUT  = 300  # seconds before giving up
 
 
 def generate(payload: dict) -> dict:
-    """Send a synchronous request to the RunPod local server and return the output dict."""
-    resp = requests.post(f"{BASE_URL}/runsync", json={"input": payload}, headers=HEADERS)
+    """Submit a job, poll until done, and return the output dict."""
+    resp = requests.post(f"{BASE_URL}/run", json={"input": payload}, headers=HEADERS)
     resp.raise_for_status()
-    data = resp.json()
-    if data.get("status") == "FAILED":
-        raise RuntimeError(f"Worker error: {data}")
-    return data.get("output", {})
+    job_id = resp.json()["id"]
+    print(f"  Job submitted: {job_id}")
+
+    deadline = time.time() + POLL_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(POLL_INTERVAL)
+        status_resp = requests.get(f"{BASE_URL}/status/{job_id}", headers=HEADERS)
+        status_resp.raise_for_status()
+        data = status_resp.json()
+        status = data["status"]
+        print(f"  Status: {status}")
+        if status == "COMPLETED":
+            return data.get("output") or {}
+        if status == "FAILED":
+            raise RuntimeError(f"Job failed: {data.get('error')}")
+        if status == "CANCELLED":
+            raise RuntimeError("Job was cancelled")
+
+    raise TimeoutError(f"Job {job_id} did not complete within {POLL_TIMEOUT}s")
 
 
 def save_images(result: dict, prefix: str = "output"):

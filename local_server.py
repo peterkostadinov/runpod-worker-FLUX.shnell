@@ -7,16 +7,24 @@ Start:
 If API_KEY is not set, a random key is generated and printed at startup.
 
 Endpoints:
-    POST /generate   — JSON body, returns generated image(s) as base64
-    GET  /health     — liveness check
+    POST /generate          — synchronous: blocks until image is ready, returns base64
+    POST /run               — async: queues job, returns {id} immediately (RunPod-compatible)
+    GET  /status/{job_id}   — poll job status; output is populated when COMPLETED
+    POST /cancel/{job_id}   — cancel a queued job
+    GET  /health            — liveness check
 """
 
+import asyncio
 import base64
 import gc
 import io
 import os
 import secrets
+import time
+import uuid
 import warnings
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -42,7 +50,6 @@ from optimum.quanto import freeze, qint8, quantize
 from PIL import Image
 from pydantic import BaseModel, Field
 from transformers import T5EncoderModel
-from typing import List, Optional
 
 # ---------------------------------------------------------------------------
 # Pydantic request / response models
@@ -66,6 +73,38 @@ class GenerateResponse(BaseModel):
     images: List[str]
     image_url: str
     seed: int
+
+
+# ---------------------------------------------------------------------------
+# Job queue models
+# ---------------------------------------------------------------------------
+
+class JobStatus(str, Enum):
+    IN_QUEUE = "IN_QUEUE"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class RunRequest(BaseModel):
+    """RunPod-compatible job submission wrapper."""
+    input: GenerateRequest
+
+
+class JobSubmitResponse(BaseModel):
+    id: str
+    status: JobStatus
+
+
+class JobStatusResponse(BaseModel):
+    id: str
+    status: JobStatus
+    output: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -159,22 +198,18 @@ pipe: FluxPipeline = None  # type: ignore[assignment]
 img2img_pipe: FluxImg2ImgPipeline = None  # type: ignore[assignment]
 inpaint_pipe: FluxInpaintPipeline = None  # type: ignore[assignment]
 
-
-@app.on_event("startup")
-async def startup():
-    global pipe, img2img_pipe, inpaint_pipe
-    pipe, img2img_pipe, inpaint_pipe = load_models()
-    print(f"[local_server] API_KEY = {API_KEY}", flush=True)
+# Job queue — populated by /run, drained by _queue_worker
+_job_store: Dict[str, Dict[str, Any]] = {}
+_job_queue: asyncio.Queue  # type: ignore[assignment]  — set in startup
+_inference_lock: asyncio.Lock  # type: ignore[assignment]  — set in startup
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "model_loaded": pipe is not None}
+# ---------------------------------------------------------------------------
+# Inference core
+# ---------------------------------------------------------------------------
 
-
-@app.post("/generate", response_model=GenerateResponse)
-@torch.inference_mode()
-def generate(req: GenerateRequest, _key=Depends(_verify_key)):
+def _run_inference(req: GenerateRequest) -> GenerateResponse:
+    """Blocking GPU inference — called from a ThreadPoolExecutor."""
     seed = req.seed if req.seed is not None else int.from_bytes(os.urandom(2), "big")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = torch.Generator(device).manual_seed(seed)
@@ -190,31 +225,129 @@ def generate(req: GenerateRequest, _key=Depends(_verify_key)):
         generator=generator,
     )
 
-    if req.mode == "img2img":
-        if not req.image:
-            return {"error": "img2img mode requires an 'image' field"}
-        init_image = _decode_base64_image(req.image)
-        images = img2img_pipe(
-            image=init_image, strength=req.strength, **common_kwargs
-        ).images
+    with torch.inference_mode():
+        if req.mode == "img2img":
+            if not req.image:
+                raise ValueError("img2img mode requires an 'image' field")
+            init_image = _decode_base64_image(req.image)
+            images = img2img_pipe(
+                image=init_image, strength=req.strength, **common_kwargs
+            ).images
 
-    elif req.mode == "inpainting":
-        if not req.image:
-            return {"error": "inpainting mode requires an 'image' field"}
-        if not req.mask_image:
-            return {"error": "inpainting mode requires a 'mask_image' field"}
-        init_image = _decode_base64_image(req.image)
-        mask = _decode_base64_image(req.mask_image)
-        images = inpaint_pipe(
-            image=init_image, mask_image=mask, strength=req.strength, **common_kwargs
-        ).images
+        elif req.mode == "inpainting":
+            if not req.image:
+                raise ValueError("inpainting mode requires an 'image' field")
+            if not req.mask_image:
+                raise ValueError("inpainting mode requires a 'mask_image' field")
+            init_image = _decode_base64_image(req.image)
+            mask = _decode_base64_image(req.mask_image)
+            images = inpaint_pipe(
+                image=init_image, mask_image=mask, strength=req.strength, **common_kwargs
+            ).images
 
-    else:  # txt2img
-        images = pipe(**common_kwargs).images
+        else:  # txt2img
+            images = pipe(**common_kwargs).images
 
     image_urls = [_pil_to_data_uri(img) for img in images]
-
     return GenerateResponse(images=image_urls, image_url=image_urls[0], seed=seed)
+
+
+async def _queue_worker() -> None:
+    """Drains _job_queue one job at a time; inference runs in a thread pool."""
+    loop = asyncio.get_event_loop()
+    while True:
+        job_id: str = await _job_queue.get()
+        job = _job_store.get(job_id)
+        if job is None or job["status"] == JobStatus.CANCELLED:
+            _job_queue.task_done()
+            continue
+
+        job["status"] = JobStatus.IN_PROGRESS
+        job["started_at"] = time.time()
+        try:
+            async with _inference_lock:
+                result: GenerateResponse = await loop.run_in_executor(
+                    None, _run_inference, job["input"]
+                )
+            job["status"] = JobStatus.COMPLETED
+            job["output"] = result.model_dump()
+        except Exception as exc:
+            job["status"] = JobStatus.FAILED
+            job["error"] = str(exc)
+            print(f"[queue_worker] Job {job_id} failed: {exc}", flush=True)
+        finally:
+            job["completed_at"] = time.time()
+            _job_queue.task_done()
+
+
+@app.on_event("startup")
+async def startup():
+    global pipe, img2img_pipe, inpaint_pipe, _job_queue, _inference_lock
+    pipe, img2img_pipe, inpaint_pipe = load_models()
+    _job_queue = asyncio.Queue()
+    _inference_lock = asyncio.Lock()
+    asyncio.create_task(_queue_worker())
+    print(f"[local_server] API_KEY = {API_KEY}", flush=True)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "model_loaded": pipe is not None}
+
+
+@app.post("/generate", response_model=GenerateResponse)
+async def generate(req: GenerateRequest, _key=Depends(_verify_key)):
+    """Synchronous endpoint — holds the connection open until the image is ready."""
+    loop = asyncio.get_event_loop()
+    async with _inference_lock:
+        return await loop.run_in_executor(None, _run_inference, req)
+
+
+@app.post("/run", response_model=JobSubmitResponse, status_code=202)
+async def submit_job(req: RunRequest, _key=Depends(_verify_key)):
+    """Queue a job and return immediately with a job ID. Poll /status/{id} for the result."""
+    job_id = str(uuid.uuid4())
+    _job_store[job_id] = {
+        "id": job_id,
+        "status": JobStatus.IN_QUEUE,
+        "input": req.input,
+        "output": None,
+        "error": None,
+        "created_at": time.time(),
+        "started_at": None,
+        "completed_at": None,
+    }
+    await _job_queue.put(job_id)
+    return JobSubmitResponse(id=job_id, status=JobStatus.IN_QUEUE)
+
+
+@app.get("/status/{job_id}", response_model=JobStatusResponse)
+async def job_status(job_id: str, _key=Depends(_verify_key)):
+    """Poll a job. When status is COMPLETED, output contains the generation result."""
+    job = _job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    return JobStatusResponse(
+        id=job["id"],
+        status=job["status"],
+        output=job["output"],
+        error=job["error"],
+        created_at=job["created_at"],
+        started_at=job["started_at"],
+        completed_at=job["completed_at"],
+    )
+
+
+@app.post("/cancel/{job_id}")
+async def cancel_job(job_id: str, _key=Depends(_verify_key)):
+    """Cancel a queued job. Has no effect on in-progress or completed jobs."""
+    job = _job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    if job["status"] == JobStatus.IN_QUEUE:
+        job["status"] = JobStatus.CANCELLED
+        job["completed_at"] = time.time()
+    return {"id": job_id, "status": job["status"]}
 
 
 # ---------------------------------------------------------------------------

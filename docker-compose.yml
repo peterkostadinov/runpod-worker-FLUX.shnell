@@ -1,20 +1,65 @@
 services:
-  worker:
+
+  # ---------------------------------------------------------------------------
+  # Queue broker — persisted to a named volume so jobs survive restarts.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # API gateway — accepts job submissions, returns IDs, serves /status.
+  # No GPU needed.  local_server.py is bind-mounted so Dockerfile stays clean.
+  # ---------------------------------------------------------------------------
+  api:
     build: .
-    command: ["python3", "-u", "/handler.py", "--rp_serve_api", "--rp_api_host", "0.0.0.0"]
+    command: ["python3", "-u", "/local_server.py"]
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      # HuggingFace auth — required for gated models
+      # Set API_KEY in .env; if blank a random key is printed at startup.
+      - API_KEY=${API_KEY:-}
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./local_server.py:/local_server.py:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # GPU inference worker — polls Redis BLPOP, runs FLUX, writes results back.
+  # Shares hf_cache with worker-test so weights are downloaded only once.
+  # redis_worker.py is bind-mounted so Dockerfile stays clean.
+  # ---------------------------------------------------------------------------
+  worker:
+    build: .
+    command: ["python3", "-u", "/redis_worker.py"]
+    env_file:
+      - .env
+    environment:
       - HF_TOKEN=${HF_TOKEN}
-      # Alias used by older huggingface_hub versions
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
       - HF_MODEL=${HF_MODEL:-black-forest-labs/FLUX.1-schnell}
+      - REDIS_URL=redis://redis:6379
     volumes:
-      # Persist downloaded model weights across container restarts
+      - ./redis_worker.py:/redis_worker.py:ro
       - hf_cache:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
     deploy:
       resources:
         limits:
@@ -26,14 +71,33 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # Run with: docker compose run --rm worker-test
-  # Processes test_input.json once then exits — does NOT start the persistent server.
+  # ---------------------------------------------------------------------------
+  # RunPod handler smoke-test — runs handler.py exactly as RunPod does.
+  # Run with:  docker compose run --rm worker-test
+  # ---------------------------------------------------------------------------
   worker-test:
-    extends:
-      service: worker
+    build: .
+    command: ["python3", "-u", "/handler.py"]
+    env_file:
+      - .env
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      - HF_MODEL=${HF_MODEL:-black-forest-labs/FLUX.1-schnell}
     volumes:
       - hf_cache:/root/.cache/huggingface
       - ./test_input.json:/test_input.json:ro
+    deploy:
+      resources:
+        limits:
+          memory: 24G
+        reservations:
+          memory: 20G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   hf_cache:
+  redis_data:
