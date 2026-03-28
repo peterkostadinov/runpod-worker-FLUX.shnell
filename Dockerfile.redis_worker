@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN pip install --no-cache-dir \
+    "redis>=4.6.0" \
+    requests>=2.32.0 \
+    python-dotenv>=1.0.0
+
+COPY redis_worker.py /redis_worker.py
+
+CMD ["python3", "-u", "/redis_worker.py"]

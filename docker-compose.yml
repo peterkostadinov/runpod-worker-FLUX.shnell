@@ -26,8 +26,9 @@ services:
   #    Dockerfile stays untouched.
   # ---------------------------------------------------------------------------
   api:
-    build: .
-    command: ["python3", "-u", "/local_server.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     ports:
       - "8000:8000"
     env_file:
@@ -37,7 +38,6 @@ services:
       - REDIS_URL=redis://redis:6379
       - IMAGE_DIR=/images
     volumes:
-      - ./local_server.py:/local_server.py:ro
       - image_store:/images
     depends_on:
       redis:
@@ -83,8 +83,9 @@ services:
   #    No GPU needed.  redis_worker.py is bind-mounted.
   # ---------------------------------------------------------------------------
   redis_worker:
-    build: .
-    command: ["python3", "-u", "/redis_worker.py"]
+    build:
+      context: .
+      dockerfile: Dockerfile.redis_worker
     env_file:
       - .env
     environment:
@@ -92,7 +93,6 @@ services:
       - WORKER_URL=http://worker:8000
       - IMAGE_DIR=/images
     volumes:
-      - ./redis_worker.py:/redis_worker.py:ro
       - image_store:/images
     depends_on:
       redis:
