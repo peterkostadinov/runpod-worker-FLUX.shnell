@@ -14,6 +14,7 @@ Jobs are submitted to POST /run, then polled via GET /status/{id}.
 
 import os
 import base64
+import random
 import time
 import requests
 from io import BytesIO
@@ -67,7 +68,7 @@ def save_images(result: dict, prefix: str = "output"):
 
     os.makedirs("test_outputs", exist_ok=True)
     for i, img_data in enumerate(images):
-        path = os.path.join("test_outputs", f"{prefix}_{i}.png")
+        path = os.path.join("test_outputs", f"{prefix}_{int(time.time())}.png")
         if isinstance(img_data, str) and img_data.startswith("/image/"):
             # Images are stored on the server — download via the API.
             resp = requests.get(f"{BASE_URL}{img_data}", headers=HEADERS)
@@ -120,10 +121,19 @@ def create_test_mask(width: int, height: int) -> str:
 # Tests
 # ---------------------------------------------------------------------------
 
+txt2img_prompts = [
+    "A futuristic city at sunset, cyberpunk style",
+    "A serene landscape with mountains and a river, in the style of Studio Ghibli",
+    "A close-up portrait of a lion wearing a crown, hyper-realistic",
+    "An astronaut riding a horse on the moon, digital art",
+    "A magical forest with glowing plants and creatures, fantasy art",
+    "A bustling medieval marketplace, in the style of a Renaissance painting",
+]
+
 def test_txt2img():
     print("\n=== Test: txt2img ===")
     result = generate({
-        "prompt": "A futuristic city at sunset, cyberpunk style",
+        "prompt": txt2img_prompts[random.randint(0, len(txt2img_prompts)-1)],
         "width": 720,
         "height": 1280,
         "seed": 42,
@@ -198,6 +208,6 @@ def test_inpainting(reference_image_path: str = None):
 if __name__ == "__main__":
     test_txt2img()
 
-    ref_path = "test_img/tiger-tank.jpg"
-    test_img2img(ref_path)
+    # ref_path = "test_img/tiger-tank.jpg"
+    # test_img2img(ref_path)
     # test_inpainting(ref_path)
